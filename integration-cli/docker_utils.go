@@ -366,8 +366,8 @@ func sockRequestRaw(method, endpoint string, data io.Reader, ct string) (*http.R
 		return nil, nil, fmt.Errorf("could not perform request: %v", err)
 	}
 	body := ioutils.NewReadCloserWrapper(resp.Body, func() error {
-		defer client.Close()
-		return resp.Body.Close()
+		defer resp.Body.Close()
+		return client.Close()
 	})
 
 	return resp, body, nil
@@ -550,6 +550,16 @@ func pullImageIfNotExist(image string) (err error) {
 	return
 }
 
+func dockerCmdWithError(c *check.C, args ...string) (string, int, error) {
+	return runCommandWithOutput(exec.Command(dockerBinary, args...))
+}
+
+func dockerCmdWithStdoutStderr(c *check.C, args ...string) (string, string, int) {
+	stdout, stderr, status, err := runCommandWithStdoutStderr(exec.Command(dockerBinary, args...))
+	c.Assert(err, check.IsNil, check.Commentf("%q failed with errors: %s, %v", strings.Join(args, " "), stderr, err))
+	return stdout, stderr, status
+}
+
 func dockerCmd(c *check.C, args ...string) (string, int) {
 	out, status, err := runCommandWithOutput(exec.Command(dockerBinary, args...))
 	c.Assert(err, check.IsNil, check.Commentf("%q failed with errors: %s, %v", strings.Join(args, " "), out, err))
@@ -632,6 +642,10 @@ type FakeContext struct {
 }
 
 func (f *FakeContext) Add(file, content string) error {
+	return f.addFile(file, []byte(content))
+}
+
+func (f *FakeContext) addFile(file string, content []byte) error {
 	filepath := path.Join(f.Dir, file)
 	dirpath := path.Dir(filepath)
 	if dirpath != "." {
@@ -639,7 +653,8 @@ func (f *FakeContext) Add(file, content string) error {
 			return err
 		}
 	}
-	return ioutil.WriteFile(filepath, []byte(content), 0644)
+	return ioutil.WriteFile(filepath, content, 0644)
+
 }
 
 func (f *FakeContext) Delete(file string) error {
@@ -651,11 +666,7 @@ func (f *FakeContext) Close() error {
 	return os.RemoveAll(f.Dir)
 }
 
-func fakeContextFromDir(dir string) *FakeContext {
-	return &FakeContext{dir}
-}
-
-func fakeContextWithFiles(files map[string]string) (*FakeContext, error) {
+func fakeContextFromNewTempDir() (*FakeContext, error) {
 	tmp, err := ioutil.TempDir("", "fake-context")
 	if err != nil {
 		return nil, err
@@ -663,8 +674,18 @@ func fakeContextWithFiles(files map[string]string) (*FakeContext, error) {
 	if err := os.Chmod(tmp, 0755); err != nil {
 		return nil, err
 	}
+	return fakeContextFromDir(tmp), nil
+}
 
-	ctx := fakeContextFromDir(tmp)
+func fakeContextFromDir(dir string) *FakeContext {
+	return &FakeContext{dir}
+}
+
+func fakeContextWithFiles(files map[string]string) (*FakeContext, error) {
+	ctx, err := fakeContextFromNewTempDir()
+	if err != nil {
+		return nil, err
+	}
 	for file, content := range files {
 		if err := ctx.Add(file, content); err != nil {
 			ctx.Close()
@@ -699,6 +720,19 @@ type FakeStorage interface {
 	Close() error
 	URL() string
 	CtxDir() string
+}
+
+func fakeBinaryStorage(archives map[string]*bytes.Buffer) (FakeStorage, error) {
+	ctx, err := fakeContextFromNewTempDir()
+	if err != nil {
+		return nil, err
+	}
+	for name, content := range archives {
+		if err := ctx.addFile(name, content.Bytes()); err != nil {
+			return nil, err
+		}
+	}
+	return fakeStorageWithContext(ctx)
 }
 
 // fakeStorage returns either a local or remote (at daemon machine) file server
@@ -1069,6 +1103,7 @@ func writeFile(dst, content string, c *check.C) {
 	if err != nil {
 		c.Fatal(err)
 	}
+	defer f.Close()
 	// Write content (truncate if it exists)
 	if _, err := io.Copy(f, strings.NewReader(content)); err != nil {
 		c.Fatal(err)

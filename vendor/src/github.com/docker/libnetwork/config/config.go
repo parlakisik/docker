@@ -4,6 +4,8 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	log "github.com/Sirupsen/logrus"
+	"github.com/docker/libnetwork/netlabel"
 )
 
 // Config encapsulates configurations of various Libnetwork components
@@ -18,6 +20,7 @@ type DaemonCfg struct {
 	Debug          bool
 	DefaultNetwork string
 	DefaultDriver  string
+	Labels         []string
 }
 
 // ClusterCfg represents cluster configuration
@@ -55,6 +58,7 @@ type Option func(c *Config)
 // OptionDefaultNetwork function returns an option setter for a default network
 func OptionDefaultNetwork(dn string) Option {
 	return func(c *Config) {
+		log.Infof("Option DefaultNetwork: %s", dn)
 		c.Daemon.DefaultNetwork = strings.TrimSpace(dn)
 	}
 }
@@ -62,13 +66,26 @@ func OptionDefaultNetwork(dn string) Option {
 // OptionDefaultDriver function returns an option setter for default driver
 func OptionDefaultDriver(dd string) Option {
 	return func(c *Config) {
+		log.Infof("Option DefaultDriver: %s", dd)
 		c.Daemon.DefaultDriver = strings.TrimSpace(dd)
+	}
+}
+
+// OptionLabels function returns an option setter for labels
+func OptionLabels(labels []string) Option {
+	return func(c *Config) {
+		for _, label := range labels {
+			if strings.HasPrefix(label, netlabel.Prefix) {
+				c.Daemon.Labels = append(c.Daemon.Labels, label)
+			}
+		}
 	}
 }
 
 // OptionKVProvider function returns an option setter for kvstore provider
 func OptionKVProvider(provider string) Option {
 	return func(c *Config) {
+		log.Infof("Option OptionKVProvider: %s", provider)
 		c.Datastore.Client.Provider = strings.TrimSpace(provider)
 	}
 }
@@ -76,6 +93,7 @@ func OptionKVProvider(provider string) Option {
 // OptionKVProviderURL function returns an option setter for kvstore url
 func OptionKVProviderURL(url string) Option {
 	return func(c *Config) {
+		log.Infof("Option OptionKVProviderURL: %s", url)
 		c.Datastore.Client.Address = strings.TrimSpace(url)
 	}
 }
@@ -87,4 +105,12 @@ func (c *Config) ProcessOptions(options ...Option) {
 			opt(c)
 		}
 	}
+}
+
+// IsValidName validates configuration objects supported by libnetwork
+func IsValidName(name string) bool {
+	if name == "" || strings.Contains(name, ".") {
+		return false
+	}
+	return true
 }

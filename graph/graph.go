@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Sirupsen/logrus"
@@ -29,11 +30,56 @@ import (
 	"github.com/docker/docker/runconfig"
 )
 
+// The type is used to protect pulling or building related image
+// layers from deleteing when filtered by dangling=true
+// The key of layers is the images ID which is pulling or building
+// The value of layers is a slice which hold layer IDs referenced to
+// pulling or building images
+type retainedLayers struct {
+	layerHolders map[string]map[string]struct{} // map[layerID]map[sessionID]
+	sync.Mutex
+}
+
+func (r *retainedLayers) Add(sessionID string, layerIDs []string) {
+	r.Lock()
+	defer r.Unlock()
+	for _, layerID := range layerIDs {
+		if r.layerHolders[layerID] == nil {
+			r.layerHolders[layerID] = map[string]struct{}{}
+		}
+		r.layerHolders[layerID][sessionID] = struct{}{}
+	}
+}
+
+func (r *retainedLayers) Delete(sessionID string, layerIDs []string) {
+	r.Lock()
+	defer r.Unlock()
+	for _, layerID := range layerIDs {
+		holders, ok := r.layerHolders[layerID]
+		if !ok {
+			continue
+		}
+		delete(holders, sessionID)
+		if len(holders) == 0 {
+			delete(r.layerHolders, layerID) // Delete any empty reference set.
+		}
+	}
+}
+
+func (r *retainedLayers) Exists(layerID string) bool {
+	r.Lock()
+	_, exists := r.layerHolders[layerID]
+	r.Unlock()
+	return exists
+}
+
 // A Graph is a store for versioned filesystem images and the relationship between them.
 type Graph struct {
-	root    string
-	idIndex *truncindex.TruncIndex
-	driver  graphdriver.Driver
+	root       string
+	idIndex    *truncindex.TruncIndex
+	driver     graphdriver.Driver
+	imageMutex imageMutex // protect images in driver.
+	retained   *retainedLayers
 }
 
 var (
@@ -56,14 +102,20 @@ func NewGraph(root string, driver graphdriver.Driver) (*Graph, error) {
 	}
 
 	graph := &Graph{
-		root:    abspath,
-		idIndex: truncindex.NewTruncIndex([]string{}),
-		driver:  driver,
+		root:     abspath,
+		idIndex:  truncindex.NewTruncIndex([]string{}),
+		driver:   driver,
+		retained: &retainedLayers{layerHolders: make(map[string]map[string]struct{})},
 	}
 	if err := graph.restore(); err != nil {
 		return nil, err
 	}
 	return graph, nil
+}
+
+// IsHeld returns whether the given layerID is being used by an ongoing pull or build.
+func (graph *Graph) IsHeld(layerID string) bool {
+	return graph.retained.Exists(layerID)
 }
 
 func (graph *Graph) restore() error {
@@ -78,6 +130,13 @@ func (graph *Graph) restore() error {
 			ids = append(ids, id)
 		}
 	}
+
+	baseIds, err := graph.restoreBaseImages()
+	if err != nil {
+		return err
+	}
+	ids = append(ids, baseIds...)
+
 	graph.idIndex = truncindex.NewTruncIndex(ids)
 	logrus.Debugf("Restored %d elements", len(ids))
 	return nil
@@ -153,17 +212,26 @@ func (graph *Graph) Create(layerData archive.ArchiveReader, containerID, contain
 
 // Register imports a pre-existing image into the graph.
 func (graph *Graph) Register(img *image.Image, layerData archive.ArchiveReader) (err error) {
+
+	if err := image.ValidateID(img.ID); err != nil {
+		return err
+	}
+
+	// We need this entire operation to be atomic within the engine. Note that
+	// this doesn't mean Register is fully safe yet.
+	graph.imageMutex.Lock(img.ID)
+	defer graph.imageMutex.Unlock(img.ID)
+
+	// The returned `error` must be named in this function's signature so that
+	// `err` is not shadowed in this deferred cleanup.
 	defer func() {
 		// If any error occurs, remove the new dir from the driver.
 		// Don't check for errors since the dir might not have been created.
-		// FIXME: this leaves a possible race condition.
 		if err != nil {
 			graph.driver.Remove(img.ID)
 		}
 	}()
-	if err := image.ValidateID(img.ID); err != nil {
-		return err
-	}
+
 	// (This is a convenience to save time. Race conditions are taken care of by os.Rename)
 	if graph.Exists(img.ID) {
 		return fmt.Errorf("Image %s already exists", img.ID)
@@ -189,9 +257,10 @@ func (graph *Graph) Register(img *image.Image, layerData archive.ArchiveReader) 
 	}
 
 	// Create root filesystem in the driver
-	if err := graph.driver.Create(img.ID, img.Parent); err != nil {
-		return fmt.Errorf("Driver %s failed to create image rootfs %s: %s", graph.driver, img.ID, err)
+	if err := createRootFilesystemInDriver(graph, img, layerData); err != nil {
+		return err
 	}
+
 	// Apply the diff/layer
 	if err := graph.storeImage(img, layerData, tmp); err != nil {
 		return err
@@ -270,20 +339,6 @@ func bufferToFile(f *os.File, src io.Reader) (int64, digest.Digest, error) {
 	return n, digest.NewDigest("sha256", h), nil
 }
 
-// Check if given error is "not empty".
-// Note: this is the way golang does it internally with os.IsNotExists.
-func isNotEmpty(err error) bool {
-	switch pe := err.(type) {
-	case nil:
-		return false
-	case *os.PathError:
-		err = pe.Err
-	case *os.LinkError:
-		err = pe.Err
-	}
-	return strings.Contains(err.Error(), " not empty")
-}
-
 // Delete atomically removes an image from the graph.
 func (graph *Graph) Delete(name string) error {
 	id, err := graph.idIndex.Get(name)
@@ -309,42 +364,33 @@ func (graph *Graph) Delete(name string) error {
 }
 
 // Map returns a list of all images in the graph, addressable by ID.
-func (graph *Graph) Map() (map[string]*image.Image, error) {
+func (graph *Graph) Map() map[string]*image.Image {
 	images := make(map[string]*image.Image)
-	err := graph.walkAll(func(image *image.Image) {
+	graph.walkAll(func(image *image.Image) {
 		images[image.ID] = image
 	})
-	if err != nil {
-		return nil, err
-	}
-	return images, nil
+	return images
 }
 
 // walkAll iterates over each image in the graph, and passes it to a handler.
 // The walking order is undetermined.
-func (graph *Graph) walkAll(handler func(*image.Image)) error {
-	files, err := ioutil.ReadDir(graph.root)
-	if err != nil {
-		return err
-	}
-	for _, st := range files {
-		if img, err := graph.Get(st.Name()); err != nil {
-			// Skip image
-			continue
+func (graph *Graph) walkAll(handler func(*image.Image)) {
+	graph.idIndex.Iterate(func(id string) {
+		if img, err := graph.Get(id); err != nil {
+			return
 		} else if handler != nil {
 			handler(img)
 		}
-	}
-	return nil
+	})
 }
 
 // ByParent returns a lookup table of images by their parent.
 // If an image of id ID has 3 children images, then the value for key ID
 // will be a list of 3 images.
 // If an image has no children, it will not have an entry in the table.
-func (graph *Graph) ByParent() (map[string][]*image.Image, error) {
+func (graph *Graph) ByParent() map[string][]*image.Image {
 	byParent := make(map[string][]*image.Image)
-	err := graph.walkAll(func(img *image.Image) {
+	graph.walkAll(func(img *image.Image) {
 		parent, err := graph.Get(img.Parent)
 		if err != nil {
 			return
@@ -355,54 +401,37 @@ func (graph *Graph) ByParent() (map[string][]*image.Image, error) {
 			byParent[parent.ID] = []*image.Image{img}
 		}
 	})
-	return byParent, err
+	return byParent
+}
+
+// If the images and layers are in pulling chain, retain them.
+// If not, they may be deleted by rmi with dangling condition.
+func (graph *Graph) Retain(sessionID string, layerIDs ...string) {
+	graph.retained.Add(sessionID, layerIDs)
+}
+
+// Release removes the referenced image id from the provided set of layers.
+func (graph *Graph) Release(sessionID string, layerIDs ...string) {
+	graph.retained.Delete(sessionID, layerIDs)
 }
 
 // Heads returns all heads in the graph, keyed by id.
 // A head is an image which is not the parent of another image in the graph.
-func (graph *Graph) Heads() (map[string]*image.Image, error) {
+func (graph *Graph) Heads() map[string]*image.Image {
 	heads := make(map[string]*image.Image)
-	byParent, err := graph.ByParent()
-	if err != nil {
-		return nil, err
-	}
-	err = graph.walkAll(func(image *image.Image) {
+	byParent := graph.ByParent()
+	graph.walkAll(func(image *image.Image) {
 		// If it's not in the byParent lookup table, then
 		// it's not a parent -> so it's a head!
 		if _, exists := byParent[image.ID]; !exists {
 			heads[image.ID] = image
 		}
 	})
-	return heads, err
+	return heads
 }
 
 func (graph *Graph) imageRoot(id string) string {
 	return filepath.Join(graph.root, id)
-}
-
-// storeImage stores file system layer data for the given image to the
-// graph's storage driver. Image metadata is stored in a file
-// at the specified root directory.
-func (graph *Graph) storeImage(img *image.Image, layerData archive.ArchiveReader, root string) (err error) {
-	// Store the layer. If layerData is not nil, unpack it into the new layer
-	if layerData != nil {
-		if img.Size, err = graph.driver.ApplyDiff(img.ID, img.Parent, layerData); err != nil {
-			return err
-		}
-	}
-
-	if err := graph.saveSize(root, int(img.Size)); err != nil {
-		return err
-	}
-
-	f, err := os.OpenFile(jsonPath(root), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(0600))
-	if err != nil {
-		return err
-	}
-
-	defer f.Close()
-
-	return json.NewEncoder(f).Encode(img)
 }
 
 // loadImage fetches the image with the given id from the graph.
@@ -492,9 +521,4 @@ func (graph *Graph) RawJSON(id string) ([]byte, error) {
 
 func jsonPath(root string) string {
 	return filepath.Join(root, "json")
-}
-
-// TarLayer returns a tar archive of the image's filesystem layer.
-func (graph *Graph) TarLayer(img *image.Image) (arch archive.Archive, err error) {
-	return graph.driver.Diff(img.ID, img.Parent)
 }

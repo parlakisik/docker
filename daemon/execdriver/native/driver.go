@@ -16,15 +16,15 @@ import (
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/docker/daemon/execdriver"
 	"github.com/docker/docker/pkg/parsers"
+	"github.com/docker/docker/pkg/pools"
 	"github.com/docker/docker/pkg/reexec"
 	sysinfo "github.com/docker/docker/pkg/system"
 	"github.com/docker/docker/pkg/term"
-	"github.com/docker/libcontainer"
-	"github.com/docker/libcontainer/apparmor"
-	"github.com/docker/libcontainer/cgroups/systemd"
-	"github.com/docker/libcontainer/configs"
-	"github.com/docker/libcontainer/system"
-	"github.com/docker/libcontainer/utils"
+	"github.com/opencontainers/runc/libcontainer"
+	"github.com/opencontainers/runc/libcontainer/cgroups/systemd"
+	"github.com/opencontainers/runc/libcontainer/configs"
+	"github.com/opencontainers/runc/libcontainer/system"
+	"github.com/opencontainers/runc/libcontainer/utils"
 )
 
 const (
@@ -48,10 +48,6 @@ func NewDriver(root, initPath string, options []string) (*driver, error) {
 	}
 
 	if err := sysinfo.MkdirAll(root, 0700); err != nil {
-		return nil, err
-	}
-	// native driver root is at docker_root/execdriver/native. Put apparmor at docker_root
-	if err := apparmor.InstallDefaultProfile(); err != nil {
 		return nil, err
 	}
 
@@ -378,10 +374,6 @@ func NewTtyConsole(console libcontainer.Console, pipes *execdriver.Pipes, rootui
 	return tty, nil
 }
 
-func (t *TtyConsole) Master() libcontainer.Console {
-	return t.console
-}
-
 func (t *TtyConsole) Resize(h, w int) error {
 	return term.SetWinsize(t.console.Fd(), &term.Winsize{Height: uint16(h), Width: uint16(w)})
 }
@@ -394,12 +386,12 @@ func (t *TtyConsole) AttachPipes(pipes *execdriver.Pipes) error {
 			defer wb.CloseWriters()
 		}
 
-		io.Copy(pipes.Stdout, t.console)
+		pools.Copy(pipes.Stdout, t.console)
 	}()
 
 	if pipes.Stdin != nil {
 		go func() {
-			io.Copy(t.console, pipes.Stdin)
+			pools.Copy(t.console, pipes.Stdin)
 
 			pipes.Stdin.Close()
 		}()

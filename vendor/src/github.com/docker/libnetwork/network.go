@@ -2,12 +2,15 @@ package libnetwork
 
 import (
 	"encoding/json"
+	"net"
 	"sync"
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/docker/docker/pkg/stringid"
+	"github.com/docker/libnetwork/config"
 	"github.com/docker/libnetwork/datastore"
 	"github.com/docker/libnetwork/driverapi"
+	"github.com/docker/libnetwork/etchosts"
 	"github.com/docker/libnetwork/netlabel"
 	"github.com/docker/libnetwork/options"
 	"github.com/docker/libnetwork/types"
@@ -50,6 +53,8 @@ type Network interface {
 // When the function returns true, the walk will stop.
 type EndpointWalker func(ep Endpoint) bool
 
+type svcMap map[string]net.IP
+
 type network struct {
 	ctrlr       *controller
 	name        string
@@ -61,6 +66,9 @@ type network struct {
 	endpoints   endpointTable
 	generic     options.Generic
 	dbIndex     uint64
+	svcRecords  svcMap
+	dbExists    bool
+	stopWatchCh chan struct{}
 	sync.Mutex
 }
 
@@ -109,6 +117,10 @@ func (n *network) Value() []byte {
 	return b
 }
 
+func (n *network) SetValue(value []byte) error {
+	return json.Unmarshal(value, n)
+}
+
 func (n *network) Index() uint64 {
 	n.Lock()
 	defer n.Unlock()
@@ -118,7 +130,14 @@ func (n *network) Index() uint64 {
 func (n *network) SetIndex(index uint64) {
 	n.Lock()
 	n.dbIndex = index
+	n.dbExists = true
 	n.Unlock()
+}
+
+func (n *network) Exists() bool {
+	n.Lock()
+	defer n.Unlock()
+	return n.dbExists
 }
 
 func (n *network) EndpointCnt() uint64 {
@@ -247,6 +266,7 @@ func (n *network) deleteNetwork() error {
 		}
 		log.Warnf("driver error deleting network %s : %v", n.name, err)
 	}
+	n.stopWatch()
 	return nil
 }
 
@@ -269,12 +289,14 @@ func (n *network) addEndpoint(ep *endpoint) error {
 	if err != nil {
 		return err
 	}
+
+	n.updateSvcRecord(ep, true)
 	return nil
 }
 
 func (n *network) CreateEndpoint(name string, options ...EndpointOption) (Endpoint, error) {
 	var err error
-	if name == "" {
+	if !config.IsValidName(name) {
 		return nil, ErrInvalidName(name)
 	}
 
@@ -282,7 +304,9 @@ func (n *network) CreateEndpoint(name string, options ...EndpointOption) (Endpoi
 		return nil, types.ForbiddenErrorf("service endpoint with name %s already exists", name)
 	}
 
-	ep := &endpoint{name: name, iFaces: []*endpointInterface{}, generic: make(map[string]interface{})}
+	ep := &endpoint{name: name,
+		iFaces:  []*endpointInterface{},
+		generic: make(map[string]interface{})}
 	ep.id = types.UUID(stringid.GenerateRandomID())
 	ep.network = n
 	ep.processOptions(options...)
@@ -380,4 +404,68 @@ func (n *network) isGlobalScoped() (bool, error) {
 	c := n.ctrlr
 	n.Unlock()
 	return c.isDriverGlobalScoped(n.networkType)
+}
+
+func (n *network) updateSvcRecord(ep *endpoint, isAdd bool) {
+	n.Lock()
+	var recs []etchosts.Record
+	for _, iface := range ep.InterfaceList() {
+		if isAdd {
+			n.svcRecords[ep.Name()] = iface.Address().IP
+			n.svcRecords[ep.Name()+"."+n.name] = iface.Address().IP
+		} else {
+			delete(n.svcRecords, ep.Name())
+			delete(n.svcRecords, ep.Name()+"."+n.name)
+		}
+
+		recs = append(recs, etchosts.Record{
+			Hosts: ep.Name(),
+			IP:    iface.Address().IP.String(),
+		})
+
+		recs = append(recs, etchosts.Record{
+			Hosts: ep.Name() + "." + n.name,
+			IP:    iface.Address().IP.String(),
+		})
+	}
+	n.Unlock()
+
+	// If there are no records to add or delete then simply return here
+	if len(recs) == 0 {
+		return
+	}
+
+	var epList []*endpoint
+	n.WalkEndpoints(func(e Endpoint) bool {
+		cEp := e.(*endpoint)
+		cEp.Lock()
+		if cEp.container != nil {
+			epList = append(epList, cEp)
+		}
+		cEp.Unlock()
+		return false
+	})
+
+	for _, cEp := range epList {
+		if isAdd {
+			cEp.addHostEntries(recs)
+		} else {
+			cEp.deleteHostEntries(recs)
+		}
+	}
+}
+
+func (n *network) getSvcRecords() []etchosts.Record {
+	n.Lock()
+	defer n.Unlock()
+
+	var recs []etchosts.Record
+	for h, ip := range n.svcRecords {
+		recs = append(recs, etchosts.Record{
+			Hosts: h,
+			IP:    ip.String(),
+		})
+	}
+
+	return recs
 }

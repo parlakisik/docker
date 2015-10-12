@@ -29,7 +29,6 @@ import (
 	"github.com/docker/docker/pkg/graphdb"
 	"github.com/docker/docker/pkg/ioutils"
 	"github.com/docker/docker/pkg/namesgenerator"
-	"github.com/docker/docker/pkg/parsers"
 	"github.com/docker/docker/pkg/stringid"
 	"github.com/docker/docker/pkg/sysinfo"
 	"github.com/docker/docker/pkg/system"
@@ -37,16 +36,15 @@ import (
 	"github.com/docker/docker/registry"
 	"github.com/docker/docker/runconfig"
 	"github.com/docker/docker/trust"
-	"github.com/docker/libcontainer/netlink"
 	"github.com/docker/libnetwork"
+	"github.com/opencontainers/runc/libcontainer/netlink"
 )
 
 var (
 	validContainerNameChars   = `[a-zA-Z0-9][a-zA-Z0-9_.-]`
 	validContainerNamePattern = regexp.MustCompile(`^/?` + validContainerNameChars + `+$`)
 
-	// TODO Windows. Change this once daemon is up and running.
-	ErrSystemNotSupported = errors.New("The Docker daemon is only supported on linux")
+	ErrSystemNotSupported = errors.New("The Docker daemon is not supported on this platform.")
 )
 
 type contStore struct {
@@ -207,8 +205,8 @@ func (daemon *Daemon) register(container *Container, updateSuffixarray bool) err
 
 	if container.IsRunning() {
 		logrus.Debugf("killing old running container %s", container.ID)
-
-		container.SetStopped(&execdriver.ExitStatus{ExitCode: 0})
+		// Set exit code to 128 + SIGKILL (9) to properly represent unsuccessful exit
+		container.SetStopped(&execdriver.ExitStatus{ExitCode: 137})
 
 		// use the current driver and ensure that the container is dead x.x
 		cmd := &execdriver.Command{
@@ -220,7 +218,7 @@ func (daemon *Daemon) register(container *Container, updateSuffixarray bool) err
 			logrus.Debugf("unmount error %s", err)
 		}
 		if err := container.ToDisk(); err != nil {
-			logrus.Debugf("saving stopped state to disk %s", err)
+			logrus.Errorf("Error saving stopped state to disk: %v", err)
 		}
 	}
 
@@ -236,7 +234,7 @@ func (daemon *Daemon) ensureName(container *Container) error {
 		container.Name = name
 
 		if err := container.ToDisk(); err != nil {
-			logrus.Debugf("Error saving container name %s", err)
+			logrus.Errorf("Error saving container name to disk: %v", err)
 		}
 	}
 	return nil
@@ -553,43 +551,6 @@ func (daemon *Daemon) RegisterLink(parent, child *Container, alias string) error
 	return nil
 }
 
-func (daemon *Daemon) RegisterLinks(container *Container, hostConfig *runconfig.HostConfig) error {
-	if hostConfig != nil && hostConfig.Links != nil {
-		for _, l := range hostConfig.Links {
-			name, alias, err := parsers.ParseLink(l)
-			if err != nil {
-				return err
-			}
-			child, err := daemon.Get(name)
-			if err != nil {
-				//An error from daemon.Get() means this name could not be found
-				return fmt.Errorf("Could not get container for %s", name)
-			}
-			for child.hostConfig.NetworkMode.IsContainer() {
-				parts := strings.SplitN(string(child.hostConfig.NetworkMode), ":", 2)
-				child, err = daemon.Get(parts[1])
-				if err != nil {
-					return fmt.Errorf("Could not get container for %s", parts[1])
-				}
-			}
-			if child.hostConfig.NetworkMode.IsHost() {
-				return runconfig.ErrConflictHostNetworkAndLinks
-			}
-			if err := daemon.RegisterLink(container, child, alias); err != nil {
-				return err
-			}
-		}
-
-		// After we load all the links into the daemon
-		// set them to nil on the hostconfig
-		hostConfig.Links = nil
-		if err := container.WriteHostConfig(); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func NewDaemon(config *Config, registryService *registry.Service) (daemon *Daemon, err error) {
 	setDefaultMtu(config)
 
@@ -599,26 +560,21 @@ func NewDaemon(config *Config, registryService *registry.Service) (daemon *Daemo
 	}
 
 	// Do we have a disabled network?
-	config.DisableNetwork = isNetworkDisabled(config)
+	config.DisableBridge = isBridgeNetworkDisabled(config)
 
-	// Check that the system is supported and we have sufficient privileges
+	// Verify the platform is supported as a daemon
+	if runtime.GOOS != "linux" && runtime.GOOS != "windows" {
+		return nil, ErrSystemNotSupported
+	}
+
+	// Validate platform-specific requirements
 	if err := checkSystem(); err != nil {
 		return nil, err
 	}
 
-	// set up SIGUSR1 handler to dump Go routine stacks
-	setupSigusr1Trap()
-
-	// set up the tmpDir to use a canonical path
-	tmp, err := tempDir(config.Root)
-	if err != nil {
-		return nil, fmt.Errorf("Unable to get the TempDir under %s: %s", config.Root, err)
-	}
-	realTmp, err := fileutils.ReadSymlinkedDirectory(tmp)
-	if err != nil {
-		return nil, fmt.Errorf("Unable to get the full path to the TempDir (%s): %s", tmp, err)
-	}
-	os.Setenv("TMPDIR", realTmp)
+	// set up SIGUSR1 handler on Unix-like systems, or a Win32 global event
+	// on Windows to dump Go routine stacks
+	setupDumpStackTrap()
 
 	// get the canonical path to the Docker root directory
 	var realRoot string
@@ -635,6 +591,17 @@ func NewDaemon(config *Config, registryService *registry.Service) (daemon *Daemo
 	if err := system.MkdirAll(config.Root, 0700); err != nil && !os.IsExist(err) {
 		return nil, err
 	}
+
+	// set up the tmpDir to use a canonical path
+	tmp, err := tempDir(config.Root)
+	if err != nil {
+		return nil, fmt.Errorf("Unable to get the TempDir under %s: %s", config.Root, err)
+	}
+	realTmp, err := fileutils.ReadSymlinkedDirectory(tmp)
+	if err != nil {
+		return nil, fmt.Errorf("Unable to get the full path to the TempDir (%s): %s", tmp, err)
+	}
+	os.Setenv("TMPDIR", realTmp)
 
 	// Set the default driver
 	graphdriver.DefaultDriver = config.GraphDriver
@@ -722,11 +689,9 @@ func NewDaemon(config *Config, registryService *registry.Service) (daemon *Daemo
 		return nil, fmt.Errorf("Couldn't create Tag store: %s", err)
 	}
 
-	if !config.DisableNetwork {
-		d.netController, err = initNetworkController(config)
-		if err != nil {
-			return nil, fmt.Errorf("Error initializing network controller: %v", err)
-		}
+	d.netController, err = initNetworkController(config)
+	if err != nil {
+		return nil, fmt.Errorf("Error initializing network controller: %v", err)
 	}
 
 	graphdbPath := filepath.Join(config.Root, "linkgraph.db")
@@ -737,12 +702,22 @@ func NewDaemon(config *Config, registryService *registry.Service) (daemon *Daemo
 
 	d.containerGraph = graph
 
-	sysInitPath, err := configureSysInit(config)
-	if err != nil {
-		return nil, err
+	var sysInitPath string
+	if config.ExecDriver == "lxc" {
+		initPath, err := configureSysInit(config)
+		if err != nil {
+			return nil, err
+		}
+		sysInitPath = initPath
 	}
 
 	sysInfo := sysinfo.New(false)
+	// Check if Devices cgroup is mounted, it is hard requirement for container security,
+	// on Linux/FreeBSD.
+	if runtime.GOOS != "windows" && !sysInfo.CgroupDevicesEnabled {
+		return nil, fmt.Errorf("Devices cgroup isn't mounted")
+	}
+
 	ed, err := execdrivers.NewDriver(config.ExecDriver, config.ExecOptions, config.ExecRoot, config.Root, sysInitPath, sysInfo)
 	if err != nil {
 		return nil, err
@@ -764,6 +739,7 @@ func NewDaemon(config *Config, registryService *registry.Service) (daemon *Daemo
 	d.RegistryService = registryService
 	d.EventsService = eventsService
 	d.root = config.Root
+	go d.execCommandGC()
 
 	if err := d.restore(); err != nil {
 		return nil, err
@@ -909,10 +885,7 @@ func (daemon *Daemon) ContainerGraph() *graphdb.Database {
 
 func (daemon *Daemon) ImageGetCached(imgID string, config *runconfig.Config) (*image.Image, error) {
 	// Retrieve all images
-	images, err := daemon.Graph().Map()
-	if err != nil {
-		return nil, err
-	}
+	images := daemon.Graph().Map()
 
 	// Store the tree in a map of map (map[parentId][childId])
 	imageMap := make(map[string]map[string]struct{})

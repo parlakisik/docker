@@ -1,6 +1,7 @@
 package types
 
 import (
+	"os"
 	"time"
 
 	"github.com/docker/docker/daemon/network"
@@ -117,11 +118,26 @@ type Container struct {
 	SizeRootFs int `json:",omitempty"`
 	Labels     map[string]string
 	Status     string
+	HostConfig struct {
+		NetworkMode string `json:",omitempty"`
+	}
 }
 
 // POST "/containers/"+containerID+"/copy"
 type CopyConfig struct {
 	Resource string
+}
+
+// ContainerPathStat is used to encode the header from
+// 	GET /containers/{name:.*}/archive
+// "name" is the file or directory name.
+// "path" is the absolute path to the resource in the container.
+type ContainerPathStat struct {
+	Name  string      `json:"name"`
+	Path  string      `json:"path"`
+	Size  int64       `json:"size"`
+	Mode  os.FileMode `json:"mode"`
+	Mtime time.Time   `json:"mtime"`
 }
 
 // GET "/containers/{name:.*}/top"
@@ -139,6 +155,7 @@ type Version struct {
 	Arch          string
 	KernelVersion string `json:",omitempty"`
 	Experimental  bool   `json:",omitempty"`
+	BuildTime     string `json:",omitempty"`
 }
 
 // GET "/info"

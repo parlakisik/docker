@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"fmt"
 	"net"
 
 	"github.com/docker/libnetwork/types"
@@ -37,14 +38,37 @@ type Sandbox interface {
 	// Remove a static route from the sandbox.
 	RemoveStaticRoute(*types.StaticRoute) error
 
+	// AddNeighbor adds a neighbor entry into the sandbox.
+	AddNeighbor(dstIP net.IP, dstMac net.HardwareAddr, option ...NeighOption) error
+
+	// DeleteNeighbor deletes neighbor entry from the sandbox.
+	DeleteNeighbor(dstIP net.IP, dstMac net.HardwareAddr) error
+
+	// Returns an interface with methods to set neighbor options.
+	NeighborOptions() NeighborOptionSetter
+
 	// Returns an interface with methods to set interface options.
 	InterfaceOptions() IfaceOptionSetter
+
+	//Invoke
+	InvokeFunc(func()) error
 
 	// Returns an interface with methods to get sandbox state.
 	Info() Info
 
 	// Destroy the sandbox
 	Destroy() error
+}
+
+// NeighborOptionSetter interfaces defines the option setter methods for interface options
+type NeighborOptionSetter interface {
+	// LinkName returns an option setter to set the srcName of the link that should
+	// be used in the neighbor entry
+	LinkName(string) NeighOption
+
+	// Family returns an option setter to set the address family for the neighbor
+	// entry. eg. AF_BRIDGE
+	Family(int) NeighOption
 }
 
 // IfaceOptionSetter interface defines the option setter methods for interface options.
@@ -123,4 +147,24 @@ type Interface interface {
 	// Remove an interface from the sandbox by renaming to original name
 	// and moving it out of the sandbox.
 	Remove() error
+
+	// Statistics returns the statistics for this interface
+	Statistics() (*InterfaceStatistics, error)
+}
+
+// InterfaceStatistics represents the interface's statistics
+type InterfaceStatistics struct {
+	RxBytes   uint64
+	RxPackets uint64
+	RxErrors  uint64
+	RxDropped uint64
+	TxBytes   uint64
+	TxPackets uint64
+	TxErrors  uint64
+	TxDropped uint64
+}
+
+func (is *InterfaceStatistics) String() string {
+	return fmt.Sprintf("\nRxBytes: %d, RxPackets: %d, RxErrors: %d, RxDropped: %d, TxBytes: %d, TxPackets: %d, TxErrors: %d, TxDropped: %d",
+		is.RxBytes, is.RxPackets, is.RxErrors, is.RxDropped, is.TxBytes, is.TxPackets, is.TxErrors, is.TxDropped)
 }
