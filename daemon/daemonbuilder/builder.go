@@ -11,6 +11,7 @@ import (
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/distribution/reference"
 	"github.com/docker/docker/api"
+	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/builder"
 	"github.com/docker/docker/cliconfig"
 	"github.com/docker/docker/container"
@@ -105,12 +106,12 @@ func (d Docker) Create(cfg *runconfig.Config, hostCfg *runconfig.HostConfig) (*c
 }
 
 // Remove removes a container specified by `id`.
-func (d Docker) Remove(id string, cfg *daemon.ContainerRmConfig) error {
+func (d Docker) Remove(id string, cfg *types.ContainerRmConfig) error {
 	return d.Daemon.ContainerRm(id, cfg)
 }
 
 // Commit creates a new Docker image from an existing Docker container.
-func (d Docker) Commit(name string, cfg *daemon.ContainerCommitConfig) (string, error) {
+func (d Docker) Commit(name string, cfg *types.ContainerCommitConfig) (string, error) {
 	return d.Daemon.Commit(name, cfg)
 }
 
@@ -167,7 +168,7 @@ func (d Docker) Copy(c *container.Container, destPath string, src builder.FileIn
 		}
 		return fixPermissions(srcPath, destPath, rootUID, rootGID, destExists)
 	}
-	if decompress {
+	if decompress && archive.IsArchivePath(srcPath) {
 		// Only try to untar if it is a file and that we've been told to decompress (when ADD-ing a remote file)
 
 		// First try to unpack the source as an archive
@@ -180,11 +181,11 @@ func (d Docker) Copy(c *container.Container, destPath string, src builder.FileIn
 		}
 
 		// try to successfully untar the orig
-		if err := d.Archiver.UntarPath(srcPath, tarDest); err == nil {
-			return nil
-		} else if err != io.EOF {
-			logrus.Debugf("Couldn't untar to %s: %v", tarDest, err)
+		err := d.Archiver.UntarPath(srcPath, tarDest)
+		if err != nil {
+			logrus.Errorf("Couldn't untar to %s: %v", tarDest, err)
 		}
+		return err
 	}
 
 	// only needed for fixPermissions, but might as well put it before CopyFileWithTar
