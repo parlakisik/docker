@@ -6,9 +6,10 @@ import (
 	"net/url"
 	"os"
 
+	"github.com/docker/distribution/reference"
+	Cli "github.com/docker/docker/cli"
 	"github.com/docker/docker/opts"
 	flag "github.com/docker/docker/pkg/mflag"
-	"github.com/docker/docker/pkg/parsers"
 	"github.com/docker/docker/pkg/urlutil"
 	"github.com/docker/docker/registry"
 )
@@ -19,9 +20,10 @@ import (
 //
 // Usage: docker import [OPTIONS] file|URL|- [REPOSITORY[:TAG]]
 func (cli *DockerCli) CmdImport(args ...string) error {
-	cmd := cli.Subcmd("import", []string{"file|URL|- [REPOSITORY[:TAG]]"}, "Create an empty filesystem image and import the contents of the\ntarball (.tar, .tar.gz, .tgz, .bzip, .tar.xz, .txz) into it, then\noptionally tag it.", true)
+	cmd := Cli.Subcmd("import", []string{"file|URL|- [REPOSITORY[:TAG]]"}, Cli.DockerCommands["import"].Description, true)
 	flChanges := opts.NewListOpts(nil)
 	cmd.Var(&flChanges, []string{"c", "-change"}, "Apply Dockerfile instruction to the created image")
+	message := cmd.String([]string{"m", "-message"}, "", "Set commit message for imported image")
 	cmd.Require(flag.Min, 1)
 
 	cmd.ParseFlags(args, true)
@@ -34,6 +36,7 @@ func (cli *DockerCli) CmdImport(args ...string) error {
 
 	v.Set("fromSrc", src)
 	v.Set("repo", repository)
+	v.Set("message", *message)
 	for _, change := range flChanges.GetAll() {
 		v.Add("changes", change)
 	}
@@ -44,8 +47,11 @@ func (cli *DockerCli) CmdImport(args ...string) error {
 
 	if repository != "" {
 		//Check if the given image name can be resolved
-		repo, _ := parsers.ParseRepositoryTag(repository)
-		if err := registry.ValidateRepositoryName(repo); err != nil {
+		ref, err := reference.ParseNamed(repository)
+		if err != nil {
+			return err
+		}
+		if err := registry.ValidateRepositoryName(ref); err != nil {
 			return err
 		}
 	}

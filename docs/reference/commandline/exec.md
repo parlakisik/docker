@@ -5,7 +5,6 @@ description = "The exec command description and usage"
 keywords = ["command, container, run, execute"]
 [menu.main]
 parent = "smn_cli"
-weight=1
 +++
 <![end-metadata]-->
 
@@ -16,7 +15,9 @@ weight=1
     Run a command in a running container
 
       -d, --detach=false         Detached mode: run command in the background
+      --help=false               Print usage
       -i, --interactive=false    Keep STDIN open even if not attached
+      --privileged=false         Give extended Linux capabilities to the command
       -t, --tty=false            Allocate a pseudo-TTY
       -u, --user=                Username or UID (format: <name|uid>[:<group|gid>])
 
@@ -52,4 +53,3 @@ This will create a new file `/tmp/execWorks` inside the running container
     $ docker exec -it ubuntu_bash bash
 
 This will create a new Bash session in the container `ubuntu_bash`.
-

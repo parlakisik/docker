@@ -1,37 +1,37 @@
+// Package registry contains client primitives to interact with a remote Docker registry.
 package registry
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
+	"fmt"
+	"io/ioutil"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/distribution/registry/api/errcode"
 	"github.com/docker/distribution/registry/api/v2"
+	"github.com/docker/distribution/registry/client"
 	"github.com/docker/distribution/registry/client/transport"
-	"github.com/docker/docker/autogen/dockerversion"
+	"github.com/docker/docker/dockerversion"
 	"github.com/docker/docker/pkg/parsers/kernel"
 	"github.com/docker/docker/pkg/tlsconfig"
 	"github.com/docker/docker/pkg/useragent"
 )
 
 var (
+	// ErrAlreadyExists is an error returned if an image being pushed
+	// already exists on the remote side
 	ErrAlreadyExists = errors.New("Image already exists")
-	ErrDoesNotExist  = errors.New("Image does not exist")
 	errLoginRequired = errors.New("Authentication is required.")
-)
-
-type TimeoutType uint32
-
-const (
-	NoTimeout TimeoutType = iota
-	ReceiveTimeout
-	ConnectTimeout
 )
 
 // dockerUserAgent is the User-Agent the Docker client uses to identify itself.
@@ -40,16 +40,37 @@ var dockerUserAgent string
 
 func init() {
 	httpVersion := make([]useragent.VersionInfo, 0, 6)
-	httpVersion = append(httpVersion, useragent.VersionInfo{"docker", dockerversion.VERSION})
-	httpVersion = append(httpVersion, useragent.VersionInfo{"go", runtime.Version()})
-	httpVersion = append(httpVersion, useragent.VersionInfo{"git-commit", dockerversion.GITCOMMIT})
+	httpVersion = append(httpVersion, useragent.VersionInfo{Name: "docker", Version: dockerversion.Version})
+	httpVersion = append(httpVersion, useragent.VersionInfo{Name: "go", Version: runtime.Version()})
+	httpVersion = append(httpVersion, useragent.VersionInfo{Name: "git-commit", Version: dockerversion.GitCommit})
 	if kernelVersion, err := kernel.GetKernelVersion(); err == nil {
-		httpVersion = append(httpVersion, useragent.VersionInfo{"kernel", kernelVersion.String()})
+		httpVersion = append(httpVersion, useragent.VersionInfo{Name: "kernel", Version: kernelVersion.String()})
 	}
-	httpVersion = append(httpVersion, useragent.VersionInfo{"os", runtime.GOOS})
-	httpVersion = append(httpVersion, useragent.VersionInfo{"arch", runtime.GOARCH})
+	httpVersion = append(httpVersion, useragent.VersionInfo{Name: "os", Version: runtime.GOOS})
+	httpVersion = append(httpVersion, useragent.VersionInfo{Name: "arch", Version: runtime.GOARCH})
 
 	dockerUserAgent = useragent.AppendVersions("", httpVersion...)
+
+	if runtime.GOOS != "linux" {
+		V2Only = true
+	}
+}
+
+func newTLSConfig(hostname string, isSecure bool) (*tls.Config, error) {
+	// PreferredServerCipherSuites should have no effect
+	tlsConfig := tlsconfig.ServerDefault
+
+	tlsConfig.InsecureSkipVerify = !isSecure
+
+	if isSecure {
+		hostDir := filepath.Join(CertsDir, cleanPath(hostname))
+		logrus.Debugf("hostDir: %s", hostDir)
+		if err := ReadCertsDirectory(&tlsConfig, hostDir); err != nil {
+			return nil, err
+		}
+	}
+
+	return &tlsConfig, nil
 }
 
 func hasFile(files []os.FileInfo, name string) bool {
@@ -59,6 +80,54 @@ func hasFile(files []os.FileInfo, name string) bool {
 		}
 	}
 	return false
+}
+
+// ReadCertsDirectory reads the directory for TLS certificates
+// including roots and certificate pairs and updates the
+// provided TLS configuration.
+func ReadCertsDirectory(tlsConfig *tls.Config, directory string) error {
+	fs, err := ioutil.ReadDir(directory)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
+	for _, f := range fs {
+		if strings.HasSuffix(f.Name(), ".crt") {
+			if tlsConfig.RootCAs == nil {
+				// TODO(dmcgowan): Copy system pool
+				tlsConfig.RootCAs = x509.NewCertPool()
+			}
+			logrus.Debugf("crt: %s", filepath.Join(directory, f.Name()))
+			data, err := ioutil.ReadFile(filepath.Join(directory, f.Name()))
+			if err != nil {
+				return err
+			}
+			tlsConfig.RootCAs.AppendCertsFromPEM(data)
+		}
+		if strings.HasSuffix(f.Name(), ".cert") {
+			certName := f.Name()
+			keyName := certName[:len(certName)-5] + ".key"
+			logrus.Debugf("cert: %s", filepath.Join(directory, f.Name()))
+			if !hasFile(fs, keyName) {
+				return fmt.Errorf("Missing key %s for certificate %s", keyName, certName)
+			}
+			cert, err := tls.LoadX509KeyPair(filepath.Join(directory, certName), filepath.Join(directory, keyName))
+			if err != nil {
+				return err
+			}
+			tlsConfig.Certificates = append(tlsConfig.Certificates, cert)
+		}
+		if strings.HasSuffix(f.Name(), ".key") {
+			keyName := f.Name()
+			certName := keyName[:len(keyName)-4] + ".cert"
+			logrus.Debugf("key: %s", filepath.Join(directory, f.Name()))
+			if !hasFile(fs, certName) {
+				return fmt.Errorf("Missing certificate %s for key %s", certName, keyName)
+			}
+		}
+	}
+
+	return nil
 }
 
 // DockerHeaders returns request modifiers that ensure requests have
@@ -74,10 +143,12 @@ func DockerHeaders(metaHeaders http.Header) []transport.RequestModifier {
 	return modifiers
 }
 
+// HTTPClient returns a HTTP client structure which uses the given transport
+// and contains the necessary headers for redirected requests
 func HTTPClient(transport http.RoundTripper) *http.Client {
 	return &http.Client{
 		Transport:     transport,
-		CheckRedirect: AddRequiredHeadersToRedirectedRequests,
+		CheckRedirect: addRequiredHeadersToRedirectedRequests,
 	}
 }
 
@@ -98,7 +169,9 @@ func trustedLocation(req *http.Request) bool {
 	return false
 }
 
-func AddRequiredHeadersToRedirectedRequests(req *http.Request, via []*http.Request) error {
+// addRequiredHeadersToRedirectedRequests adds the necessary redirection headers
+// for redirected requests
+func addRequiredHeadersToRedirectedRequests(req *http.Request, via []*http.Request) error {
 	if via != nil && via[0] != nil {
 		if trustedLocation(req) && trustedLocation(via[0]) {
 			req.Header = via[0].Header
@@ -118,12 +191,14 @@ func AddRequiredHeadersToRedirectedRequests(req *http.Request, via []*http.Reque
 func shouldV2Fallback(err errcode.Error) bool {
 	logrus.Debugf("v2 error: %T %v", err, err)
 	switch err.Code {
-	case v2.ErrorCodeUnauthorized, v2.ErrorCodeManifestUnknown:
+	case errcode.ErrorCodeUnauthorized, v2.ErrorCodeManifestUnknown:
 		return true
 	}
 	return false
 }
 
+// ErrNoSupport is an error type used for errors indicating that an operation
+// is not supported. It encapsulates a more specific error.
 type ErrNoSupport struct{ Err error }
 
 func (e ErrNoSupport) Error() string {
@@ -133,6 +208,8 @@ func (e ErrNoSupport) Error() string {
 	return e.Err.Error()
 }
 
+// ContinueOnError returns true if we should fallback to the next endpoint
+// as a result of this error.
 func ContinueOnError(err error) bool {
 	switch v := err.(type) {
 	case errcode.Errors:
@@ -141,10 +218,20 @@ func ContinueOnError(err error) bool {
 		return ContinueOnError(v.Err)
 	case errcode.Error:
 		return shouldV2Fallback(v)
+	case *client.UnexpectedHTTPResponseError:
+		return true
+	case error:
+		return !strings.Contains(err.Error(), strings.ToLower(syscall.ENOSPC.Error()))
 	}
-	return false
+	// let's be nice and fallback if the error is a completely
+	// unexpected one.
+	// If new errors have to be handled in some way, please
+	// add them to the switch above.
+	return true
 }
 
+// NewTransport returns a new HTTP transport. If tlsConfig is nil, it uses the
+// default TLS configuration.
 func NewTransport(tlsConfig *tls.Config) *http.Transport {
 	if tlsConfig == nil {
 		var cfg = tlsconfig.ServerDefault

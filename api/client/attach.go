@@ -8,6 +8,7 @@ import (
 
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/docker/api/types"
+	Cli "github.com/docker/docker/cli"
 	flag "github.com/docker/docker/pkg/mflag"
 	"github.com/docker/docker/pkg/signal"
 )
@@ -16,9 +17,10 @@ import (
 //
 // Usage: docker attach [OPTIONS] CONTAINER
 func (cli *DockerCli) CmdAttach(args ...string) error {
-	cmd := cli.Subcmd("attach", []string{"CONTAINER"}, "Attach to a running container", true)
-	noStdin := cmd.Bool([]string{"#nostdin", "-no-stdin"}, false, "Do not attach STDIN")
-	proxy := cmd.Bool([]string{"#sig-proxy", "-sig-proxy"}, true, "Proxy all received signals to the process")
+	cmd := Cli.Subcmd("attach", []string{"CONTAINER"}, Cli.DockerCommands["attach"].Description, true)
+	noStdin := cmd.Bool([]string{"-no-stdin"}, false, "Do not attach STDIN")
+	proxy := cmd.Bool([]string{"-sig-proxy"}, true, "Proxy all received signals to the process")
+
 	cmd.Require(flag.Exact, 1)
 
 	cmd.ParseFlags(args, true)
@@ -37,6 +39,10 @@ func (cli *DockerCli) CmdAttach(args ...string) error {
 
 	if !c.State.Running {
 		return fmt.Errorf("You cannot attach to a stopped container, start it first")
+	}
+
+	if c.State.Paused {
+		return fmt.Errorf("You cannot attach to a paused container, unpause it first")
 	}
 
 	if err := cli.CheckTtyInput(!*noStdin, c.Config.Tty); err != nil {
@@ -75,7 +81,7 @@ func (cli *DockerCli) CmdAttach(args ...string) error {
 		return err
 	}
 	if status != 0 {
-		return StatusError{StatusCode: status}
+		return Cli.StatusError{StatusCode: status}
 	}
 
 	return nil

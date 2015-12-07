@@ -1,25 +1,25 @@
 <!--[metadata]>
 +++
-title = "Using the command line"
+title = "Use the Docker command line"
 description = "Docker's CLI command description and usage"
 keywords = ["Docker, Docker documentation, CLI,  command line"]
 [menu.main]
 parent = "smn_cli"
+weight = -2
 +++
 <![end-metadata]-->
 
-# Using the command line
-
-> **Note:** If you are using a remote Docker daemon, such as Boot2Docker,
-> then _do not_ type the `sudo` before the `docker` commands shown in the
-> documentation's examples.
+# Use the Docker command line
 
 To list available commands, either run `docker` with no parameters
 or execute `docker help`:
 
     $ docker
       Usage: docker [OPTIONS] COMMAND [arg...]
-        -H, --host=[]: The socket(s) to bind to in daemon mode, specified using one or more tcp://host:port, unix:///path/to/socket, fd://* or fd://socketfd.
+             docker daemon [ --help | ... ]
+             docker [ --help | -v | --version ]
+
+        -H, --host=[]: The socket(s) to talk to the Docker daemon in the format of tcp://host:port/path, unix:///path/to/socket, fd://* or fd://socketfd.
 
       A self-sufficient runtime for Linux containers.
 
@@ -31,7 +31,7 @@ each `docker` command with `sudo`. To avoid having to use `sudo` with the
 `docker` and add users to it.
 
 For more information about installing Docker or `sudo` configuration, refer to
-the [installation](/installation) instructions for your operating system.
+the [installation](../../installation/index.md) instructions for your operating system.
 
 ## Environment variables
 
@@ -46,6 +46,10 @@ by the `docker` command line:
   unsuitable for Docker.
 * `DOCKER_RAMDISK` If set this will disable 'pivot_root'.
 * `DOCKER_TLS_VERIFY` When set Docker uses TLS and verifies the remote.
+* `DOCKER_CONTENT_TRUST` When set Docker uses notary to sign and verify images.
+  Equates to `--disable-content-trust=false` for build, create, pull, push, run.
+* `DOCKER_CONTENT_TRUST_SERVER` The URL of the Notary server to use. This defaults
+  to the same URL as the registry.
 * `DOCKER_TMPDIR` Location for temporary Docker files.
 
 Because Docker is developed using 'Go', you can also use any environment
@@ -85,19 +89,36 @@ mechanisms, you must keep in mind the order of precedence among them. Command
 line options override environment variables and environment variables override
 properties you specify in a `config.json` file.
 
-The `config.json` file stores a JSON encoding of a single `HttpHeaders`
-property. The property specifies a set of headers to include in all messages
+The `config.json` file stores a JSON encoding of several properties:
+
+The property `HttpHeaders` specifies a set of headers to include in all messages
 sent from the Docker client to the daemon. Docker does not try to interpret or
 understand these header; it simply puts them into the messages. Docker does
 not allow these headers to change any headers it sets for itself.
 
+The property `psFormat` specifies the default format for `docker ps` output.
+When the `--format` flag is not provided with the `docker ps` command,
+Docker's client uses this property. If this property is not set, the client
+falls back to the default table format. For a list of supported formatting
+directives, see the [**Formatting** section in the `docker ps` documentation](ps.md)
+
 Following is a sample `config.json` file:
 
     {
-      "HttpHeaders: {
+      "HttpHeaders": {
         "MyHeader": "MyValue"
-      }
+      },
+      "psFormat": "table {{.ID}}\\t{{.Image}}\\t{{.Command}}\\t{{.Labels}}"
     }
+
+### Notary
+
+If using your own notary server and a self-signed certificate or an internal
+Certificate Authority, you need to place the certificate at
+`tls/<registry_url>/ca.crt` in your docker config directory.
+
+Alternatively you can trust the certificate globally by adding it to your system's
+list of root Certificate Authorities.
 
 ## Help
 
@@ -111,7 +132,7 @@ To list the help on any command just execute the command, followed by the
     Run a command in a new container
 
       -a, --attach=[]            Attach to STDIN, STDOUT or STDERR
-      -c, --cpu-shares=0         CPU shares (relative weight)
+      --cpu-shares=0             CPU shares (relative weight)
     ...
 
 ## Option types

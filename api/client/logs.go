@@ -7,19 +7,25 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types"
+	Cli "github.com/docker/docker/cli"
 	flag "github.com/docker/docker/pkg/mflag"
 	"github.com/docker/docker/pkg/timeutils"
 )
+
+var validDrivers = map[string]bool{
+	"json-file": true,
+	"journald":  true,
+}
 
 // CmdLogs fetches the logs of a given container.
 //
 // docker logs [OPTIONS] CONTAINER
 func (cli *DockerCli) CmdLogs(args ...string) error {
-	cmd := cli.Subcmd("logs", []string{"CONTAINER"}, "Fetch the logs of a container", true)
+	cmd := Cli.Subcmd("logs", []string{"CONTAINER"}, Cli.DockerCommands["logs"].Description, true)
 	follow := cmd.Bool([]string{"f", "-follow"}, false, "Follow log output")
 	since := cmd.String([]string{"-since"}, "", "Show logs since timestamp")
 	times := cmd.Bool([]string{"t", "-timestamps"}, false, "Show timestamps")
-	tail := cmd.String([]string{"-tail"}, "latest", "Number of lines to show from the end of the logs")
+	tail := cmd.String([]string{"-tail"}, "all", "Number of lines to show from the end of the logs")
 	cmd.Require(flag.Exact, 1)
 
 	cmd.ParseFlags(args, true)
@@ -36,8 +42,8 @@ func (cli *DockerCli) CmdLogs(args ...string) error {
 		return err
 	}
 
-	if logType := c.HostConfig.LogConfig.Type; logType != "json-file" {
-		return fmt.Errorf("\"logs\" command is supported only for \"json-file\" logging driver (got: %s)", logType)
+	if !validDrivers[c.HostConfig.LogConfig.Type] {
+		return fmt.Errorf("\"logs\" command is supported only for \"json-file\" and \"journald\" logging drivers (got: %s)", c.HostConfig.LogConfig.Type)
 	}
 
 	v := url.Values{}
@@ -45,7 +51,11 @@ func (cli *DockerCli) CmdLogs(args ...string) error {
 	v.Set("stderr", "1")
 
 	if *since != "" {
-		v.Set("since", timeutils.GetTimestamp(*since, time.Now()))
+		ts, err := timeutils.GetTimestamp(*since, time.Now())
+		if err != nil {
+			return err
+		}
+		v.Set("since", ts)
 	}
 
 	if *times {

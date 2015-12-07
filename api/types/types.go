@@ -5,7 +5,9 @@ import (
 	"time"
 
 	"github.com/docker/docker/daemon/network"
+	"github.com/docker/docker/pkg/nat"
 	"github.com/docker/docker/pkg/version"
+	"github.com/docker/docker/registry"
 	"github.com/docker/docker/runconfig"
 )
 
@@ -19,35 +21,41 @@ type ContainerCreateResponse struct {
 	Warnings []string `json:"Warnings"`
 }
 
-// POST /containers/{name:.*}/exec
+// ContainerExecCreateResponse contains response of Remote API:
+// POST "/containers/{name:.*}/exec"
 type ContainerExecCreateResponse struct {
 	// ID is the exec ID.
 	ID string `json:"Id"`
 }
 
-// POST /auth
+// AuthResponse contains response of Remote API:
+// POST "/auth"
 type AuthResponse struct {
 	// Status is the authentication status
 	Status string `json:"Status"`
 }
 
+// ContainerWaitResponse contains response of Remote API:
 // POST "/containers/"+containerID+"/wait"
 type ContainerWaitResponse struct {
 	// StatusCode is the status code of the wait job
 	StatusCode int `json:"StatusCode"`
 }
 
+// ContainerCommitResponse contains response of Remote API:
 // POST "/commit?container="+containerID
 type ContainerCommitResponse struct {
 	ID string `json:"Id"`
 }
 
+// ContainerChange contains response of Remote API:
 // GET "/containers/{name:.*}/changes"
 type ContainerChange struct {
 	Kind int
 	Path string
 }
 
+// ImageHistory contains response of Remote API:
 // GET "/images/{name:.*}/history"
 type ImageHistory struct {
 	ID        string `json:"Id"`
@@ -58,35 +66,42 @@ type ImageHistory struct {
 	Comment   string
 }
 
+// ImageDelete contains response of Remote API:
 // DELETE "/images/{name:.*}"
 type ImageDelete struct {
 	Untagged string `json:",omitempty"`
 	Deleted  string `json:",omitempty"`
 }
 
+// Image contains response of Remote API:
 // GET "/images/json"
 type Image struct {
 	ID          string `json:"Id"`
-	ParentId    string
+	ParentID    string `json:"ParentId"`
 	RepoTags    []string
 	RepoDigests []string
-	Created     int
-	Size        int
-	VirtualSize int
+	Created     int64
+	Size        int64
+	VirtualSize int64
 	Labels      map[string]string
 }
 
+// GraphDriverData returns Image's graph driver config info
+// when calling inspect command
 type GraphDriverData struct {
 	Name string
 	Data map[string]string
 }
 
+// ImageInspect contains response of Remote API:
 // GET "/images/{name:.*}/json"
 type ImageInspect struct {
-	Id              string
+	ID              string `json:"Id"`
+	RepoTags        []string
+	RepoDigests     []string
 	Parent          string
 	Comment         string
-	Created         time.Time
+	Created         string
 	Container       string
 	ContainerConfig *runconfig.Config
 	DockerVersion   string
@@ -99,7 +114,8 @@ type ImageInspect struct {
 	GraphDriver     GraphDriverData
 }
 
-// GET  "/containers/json"
+// Port stores open ports info of container
+// e.g. {"PrivatePort": 8080, "PublicPort": 80, "Type": "tcp"}
 type Port struct {
 	IP          string `json:",omitempty"`
 	PrivatePort int
@@ -107,15 +123,18 @@ type Port struct {
 	Type        string
 }
 
+// Container contains response of Remote API:
+// GET  "/containers/json"
 type Container struct {
 	ID         string `json:"Id"`
 	Names      []string
 	Image      string
+	ImageID    string
 	Command    string
-	Created    int
+	Created    int64
 	Ports      []Port
-	SizeRw     int `json:",omitempty"`
-	SizeRootFs int `json:",omitempty"`
+	SizeRw     int64 `json:",omitempty"`
+	SizeRootFs int64 `json:",omitempty"`
 	Labels     map[string]string
 	Status     string
 	HostConfig struct {
@@ -123,32 +142,35 @@ type Container struct {
 	}
 }
 
+// CopyConfig contains request body of Remote API:
 // POST "/containers/"+containerID+"/copy"
 type CopyConfig struct {
 	Resource string
 }
 
 // ContainerPathStat is used to encode the header from
-// 	GET /containers/{name:.*}/archive
-// "name" is the file or directory name.
-// "path" is the absolute path to the resource in the container.
+// GET "/containers/{name:.*}/archive"
+// "Name" is the file or directory name.
 type ContainerPathStat struct {
-	Name  string      `json:"name"`
-	Path  string      `json:"path"`
-	Size  int64       `json:"size"`
-	Mode  os.FileMode `json:"mode"`
-	Mtime time.Time   `json:"mtime"`
+	Name       string      `json:"name"`
+	Size       int64       `json:"size"`
+	Mode       os.FileMode `json:"mode"`
+	Mtime      time.Time   `json:"mtime"`
+	LinkTarget string      `json:"linkTarget"`
 }
 
+// ContainerProcessList contains response of Remote API:
 // GET "/containers/{name:.*}/top"
 type ContainerProcessList struct {
 	Processes [][]string
 	Titles    []string
 }
 
+// Version contains response of Remote API:
+// GET "/version"
 type Version struct {
 	Version       string
-	ApiVersion    version.Version
+	APIVersion    version.Version `json:"ApiVersion"`
 	GitCommit     string
 	GoVersion     string
 	Os            string
@@ -158,6 +180,7 @@ type Version struct {
 	BuildTime     string `json:",omitempty"`
 }
 
+// Info contains response of Remote API:
 // GET "/info"
 type Info struct {
 	ID                 string
@@ -165,13 +188,16 @@ type Info struct {
 	Images             int
 	Driver             string
 	DriverStatus       [][2]string
+	Plugins            PluginsInfo
 	MemoryLimit        bool
 	SwapLimit          bool
-	CpuCfsPeriod       bool
-	CpuCfsQuota        bool
+	CPUCfsPeriod       bool `json:"CpuCfsPeriod"`
+	CPUCfsQuota        bool `json:"CpuCfsQuota"`
+	CPUShares          bool
+	CPUSet             bool
 	IPv4Forwarding     bool
 	BridgeNfIptables   bool
-	BridgeNfIp6tables  bool
+	BridgeNfIP6tables  bool `json:"BridgeNfIp6tables"`
 	Debug              bool
 	NFd                int
 	OomKillDisable     bool
@@ -182,22 +208,36 @@ type Info struct {
 	NEventsListener    int
 	KernelVersion      string
 	OperatingSystem    string
+	OSType             string
+	Architecture       string
 	IndexServerAddress string
-	RegistryConfig     interface{}
+	RegistryConfig     *registry.ServiceConfig
 	InitSha1           string
 	InitPath           string
 	NCPU               int
 	MemTotal           int64
 	DockerRootDir      string
-	HttpProxy          string
-	HttpsProxy         string
+	HTTPProxy          string `json:"HttpProxy"`
+	HTTPSProxy         string `json:"HttpsProxy"`
 	NoProxy            string
 	Name               string
 	Labels             []string
 	ExperimentalBuild  bool
+	ServerVersion      string
+	ClusterStore       string
+	ClusterAdvertise   string
 }
 
-// This struct is a temp struct used by execStart
+// PluginsInfo is temp struct holds Plugins name
+// registered with docker daemon. It used by Info struct
+type PluginsInfo struct {
+	// List of Volume plugins registered
+	Volume []string
+	// List of Network plugins registered
+	Network []string
+}
+
+// ExecStartCheck is a temp struct used by execStart
 // Config fields is part of ExecConfig in runconfig package
 type ExecStartCheck struct {
 	// ExecStart will first check if it's detached
@@ -206,7 +246,10 @@ type ExecStartCheck struct {
 	Tty bool
 }
 
+// ContainerState stores container's running state
+// it's part of ContainerJSONBase and will return by "inspect" command
 type ContainerState struct {
+	Status     string
 	Running    bool
 	Paused     bool
 	Restarting bool
@@ -215,19 +258,19 @@ type ContainerState struct {
 	Pid        int
 	ExitCode   int
 	Error      string
-	StartedAt  time.Time
-	FinishedAt time.Time
+	StartedAt  string
+	FinishedAt string
 }
 
+// ContainerJSONBase contains response of Remote API:
 // GET "/containers/{name:.*}/json"
 type ContainerJSONBase struct {
-	Id              string
-	Created         time.Time
+	ID              string `json:"Id"`
+	Created         string
 	Path            string
 	Args            []string
 	State           *ContainerState
 	Image           string
-	NetworkSettings *network.Settings
 	ResolvConfPath  string
 	HostnamePath    string
 	HostsPath       string
@@ -235,34 +278,130 @@ type ContainerJSONBase struct {
 	Name            string
 	RestartCount    int
 	Driver          string
-	ExecDriver      string
 	MountLabel      string
 	ProcessLabel    string
-	Volumes         map[string]string
-	VolumesRW       map[string]bool
 	AppArmorProfile string
 	ExecIDs         []string
 	HostConfig      *runconfig.HostConfig
 	GraphDriver     GraphDriverData
+	SizeRw          *int64 `json:",omitempty"`
+	SizeRootFs      *int64 `json:",omitempty"`
 }
 
+// ContainerJSON is newly used struct along with MountPoint
 type ContainerJSON struct {
 	*ContainerJSONBase
-	Config *runconfig.Config
+	Mounts          []MountPoint
+	Config          *runconfig.Config
+	NetworkSettings *NetworkSettings
 }
 
-// backcompatibility struct along with ContainerConfig
-type ContainerJSONRaw struct {
-	*ContainerJSONBase
-	Config *ContainerConfig
+// NetworkSettings exposes the network settings in the api
+type NetworkSettings struct {
+	NetworkSettingsBase
+	DefaultNetworkSettings
+	Networks map[string]*network.EndpointSettings
 }
 
-type ContainerConfig struct {
-	*runconfig.Config
+// NetworkSettingsBase holds basic information about networks
+type NetworkSettingsBase struct {
+	Bridge                 string
+	SandboxID              string
+	HairpinMode            bool
+	LinkLocalIPv6Address   string
+	LinkLocalIPv6PrefixLen int
+	Ports                  nat.PortMap
+	SandboxKey             string
+	SecondaryIPAddresses   []network.Address
+	SecondaryIPv6Addresses []network.Address
+}
 
-	// backward compatibility, they now live in HostConfig
-	Memory     int64
-	MemorySwap int64
-	CpuShares  int64
-	Cpuset     string
+// DefaultNetworkSettings holds network information
+// during the 2 release deprecation period.
+// It will be removed in Docker 1.11.
+type DefaultNetworkSettings struct {
+	EndpointID          string
+	Gateway             string
+	GlobalIPv6Address   string
+	GlobalIPv6PrefixLen int
+	IPAddress           string
+	IPPrefixLen         int
+	IPv6Gateway         string
+	MacAddress          string
+}
+
+// MountPoint represents a mount point configuration inside the container.
+type MountPoint struct {
+	Name        string `json:",omitempty"`
+	Source      string
+	Destination string
+	Driver      string `json:",omitempty"`
+	Mode        string
+	RW          bool
+}
+
+// Volume represents the configuration of a volume for the remote API
+type Volume struct {
+	Name       string // Name is the name of the volume
+	Driver     string // Driver is the Driver name used to create the volume
+	Mountpoint string // Mountpoint is the location on disk of the volume
+}
+
+// VolumesListResponse contains the response for the remote API:
+// GET "/volumes"
+type VolumesListResponse struct {
+	Volumes []*Volume // Volumes is the list of volumes being returned
+}
+
+// VolumeCreateRequest contains the response for the remote API:
+// POST "/volumes/create"
+type VolumeCreateRequest struct {
+	Name       string            // Name is the requested name of the volume
+	Driver     string            // Driver is the name of the driver that should be used to create the volume
+	DriverOpts map[string]string // DriverOpts holds the driver specific options to use for when creating the volume.
+}
+
+// NetworkResource is the body of the "get network" http response message
+type NetworkResource struct {
+	Name       string
+	ID         string `json:"Id"`
+	Scope      string
+	Driver     string
+	IPAM       network.IPAM
+	Containers map[string]EndpointResource
+	Options    map[string]string
+}
+
+// EndpointResource contains network resources allocated and used for a container in a network
+type EndpointResource struct {
+	Name        string
+	EndpointID  string
+	MacAddress  string
+	IPv4Address string
+	IPv6Address string
+}
+
+// NetworkCreate is the expected body of the "create network" http request message
+type NetworkCreate struct {
+	Name           string
+	CheckDuplicate bool
+	Driver         string
+	IPAM           network.IPAM
+	Options        map[string]string
+}
+
+// NetworkCreateResponse is the response message sent by the server for network create call
+type NetworkCreateResponse struct {
+	ID      string `json:"Id"`
+	Warning string
+}
+
+// NetworkConnect represents the data to be used to connect a container to the network
+type NetworkConnect struct {
+	Container string
+}
+
+// NetworkDisconnect represents the data to be used to disconnect a container from the network
+type NetworkDisconnect struct {
+	Container string
 }

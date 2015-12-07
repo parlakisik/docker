@@ -1,4 +1,4 @@
-// +build linux
+// +build linux freebsd
 
 package sockets
 
@@ -10,17 +10,17 @@ import (
 	"syscall"
 
 	"github.com/Sirupsen/logrus"
-	"github.com/docker/docker/pkg/listenbuffer"
 	"github.com/opencontainers/runc/libcontainer/user"
 )
 
-func NewUnixSocket(path, group string, activate <-chan struct{}) (net.Listener, error) {
+// NewUnixSocket creates a unix socket with the specified path and group.
+func NewUnixSocket(path, group string) (net.Listener, error) {
 	if err := syscall.Unlink(path); err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
 	mask := syscall.Umask(0777)
 	defer syscall.Umask(mask)
-	l, err := listenbuffer.NewListenBuffer("unix", path, activate)
+	l, err := net.Listen("unix", path)
 	if err != nil {
 		return nil, err
 	}

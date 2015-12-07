@@ -5,7 +5,6 @@ description = "The pull command description and usage"
 keywords = ["pull, image, hub, docker"]
 [menu.main]
 parent = "smn_cli"
-weight=1
 +++
 <![end-metadata]-->
 
@@ -15,7 +14,9 @@ weight=1
 
     Pull an image or a repository from the registry
 
-      -a, --all-tags=false    Download all tagged images in the repository
+      -a, --all-tags=false          Download all tagged images in the repository
+      --disable-content-trust=true  Skip image verification
+      --help=false                  Print usage
 
 Most of your images will be created on top of a base image from the
 [Docker Hub](https://hub.docker.com) registry.
@@ -48,4 +49,3 @@ use `docker pull`:
     # manually specifies the path to the default Docker registry. This could
     # be replaced with the path to a local registry to pull from another source.
     # sudo docker pull myhub.com:8080/test-image
-

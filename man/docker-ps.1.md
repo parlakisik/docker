@@ -7,16 +7,14 @@ docker-ps - List containers
 # SYNOPSIS
 **docker ps**
 [**-a**|**--all**[=*false*]]
-[**--before**[=*BEFORE*]]
-[**--help**]
 [**-f**|**--filter**[=*[]*]]
+[**--format**=*"TEMPLATE"*]
+[**--help**]
 [**-l**|**--latest**[=*false*]]
 [**-n**[=*-1*]]
 [**--no-trunc**[=*false*]]
 [**-q**|**--quiet**[=*false*]]
 [**-s**|**--size**[=*false*]]
-[**--since**[=*SINCE*]]
-
 
 # DESCRIPTION
 
@@ -27,12 +25,6 @@ the running containers.
 **-a**, **--all**=*true*|*false*
    Show all containers. Only running containers are shown by default. The default is *false*.
 
-**--before**=""
-   Show only containers created before Id or Name, including non-running containers.
-
-**--help**
-  Print usage statement
-
 **-f**, **--filter**=[]
    Provide filter values. Valid filters:
                           exited=<int> - containers with exit code of <int>
@@ -40,12 +32,33 @@ the running containers.
                           status=(created|restarting|running|paused|exited)
                           name=<string> - container's name
                           id=<ID> - container's ID
+                          before=(<container-name>|<container-id>)
+                          since=(<container-name>|<container-id>)
+                          ancestor=(<image-name>[:tag]|<image-id>|<image@digest>) - filters containers that were
+                          created from the given image or a descendant.
+
+**--format**="*TEMPLATE*"
+   Pretty-print containers using a Go template.
+   Valid placeholders:
+      .ID - Container ID
+      .Image - Image ID
+      .Command - Quoted command
+      .CreatedAt - Time when the container was created.
+      .RunningFor - Elapsed time since the container was started.
+      .Ports - Exposed ports.
+      .Status - Container status.
+      .Size - Container disk size.
+      .Labels - All labels asigned to the container.
+      .Label - Value of a specific label for this container. For example `{{.Label "com.docker.swarm.cpu"}}`
+
+**--help**
+  Print usage statement
 
 **-l**, **--latest**=*true*|*false*
-   Show only the latest created container, include non-running ones. The default is *false*.
+   Show only the latest created container (includes all states). The default is *false*.
 
-**-n**=-1
-   Show n last created containers, include non-running ones.
+**-n**=*-1*
+   Show n last created containers (includes all states).
 
 **--no-trunc**=*true*|*false*
    Don't truncate output. The default is *false*.
@@ -55,9 +68,6 @@ the running containers.
 
 **-s**, **--size**=*true*|*false*
    Display total file sizes. The default is *false*.
-
-**--since**=""
-   Show only containers created since Id or Name, include non-running ones.
 
 # EXAMPLES
 # Display all containers, including non-running
@@ -81,6 +91,32 @@ the running containers.
 
     # docker ps -a -q --filter=name=determined_torvalds
     c1d3b0166030
+
+# Display containers with their commands
+
+    # docker ps --format "{{.ID}}: {{.Command}}"
+    a87ecb4f327c: /bin/sh -c #(nop) MA
+    01946d9d34d8: /bin/sh -c #(nop) MA
+    c1d3b0166030: /bin/sh -c yum -y up
+    41d50ecd2f57: /bin/sh -c #(nop) MA
+
+# Display containers with their labels in a table
+
+    # docker ps --format "table {{.ID}}\t{{.Labels}}"
+    CONTAINER ID        LABELS
+    a87ecb4f327c        com.docker.swarm.node=ubuntu,com.docker.swarm.storage=ssd
+    01946d9d34d8
+    c1d3b0166030        com.docker.swarm.node=debian,com.docker.swarm.cpu=6
+    41d50ecd2f57        com.docker.swarm.node=fedora,com.docker.swarm.cpu=3,com.docker.swarm.storage=ssd
+
+# Display containers with their node label in a table
+
+    # docker ps --format 'table {{.ID}}\t{{(.Label "com.docker.swarm.node")}}'
+    CONTAINER ID        NODE
+    a87ecb4f327c        ubuntu
+    01946d9d34d8
+    c1d3b0166030        debian
+    41d50ecd2f57        fedora
 
 # HISTORY
 April 2014, Originally compiled by William Henry (whenry at redhat dot com)

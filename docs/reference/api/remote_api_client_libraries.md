@@ -86,6 +86,12 @@ will add the libraries here.
       <td>Active</td>
     </tr>
     <tr>
+      <td>HTML (Web Components)</td>
+      <td>docker-elements</td>
+      <td><a class="reference external" href="https://github.com/kapalhq/docker-elements">https://github.com/kapalhq/docker-elements</a></td>
+      <td>Active</td>
+    </tr>
+    <tr>
       <td>Java</td>
       <td>docker-java</td>
       <td><a class="reference external" href="https://github.com/docker-java/docker-java">https://github.com/docker-java/docker-java</a></td>
@@ -101,6 +107,12 @@ will add the libraries here.
       <td>Java</td>
       <td>jclouds-docker</td>
       <td><a class="reference external" href="https://github.com/jclouds/jclouds-labs/tree/master/docker">https://github.com/jclouds/jclouds-labs/tree/master/docker</a></td>
+      <td>Active</td>
+    </tr>
+    <tr>
+      <td>Java</td>
+      <td>rx-docker-client</td>
+      <td><a class="reference external" href="https://github.com/shekhargulati/rx-docker-client">https://github.com/shekhargulati/rx-docker-client</a></td>
       <td>Active</td>
     </tr>
     <tr>
@@ -123,6 +135,12 @@ will add the libraries here.
       <td><a class="reference external" href="https://github.com/dgoujard/docker-js">https://github.com/dgoujard/docker-js</a></td>
       <td>Outdated</td>
     </tr>
+    <tr>
+      <td>JavaScript (Angular) <strong>WebUI</strong></td>
+      <td>Albatros</td>
+      <td><a class="reference external" href="https://github.com/dcylabs/albatros">https://github.com/dcylabs/albatros</a></td>
+      <td>Active</td>
+    </tr>    
     <tr>
       <td>JavaScript (Angular) <strong>WebUI</strong></td>
       <td>docker-cp</td>

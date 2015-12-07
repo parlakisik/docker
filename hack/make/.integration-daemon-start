@@ -13,7 +13,6 @@ fi
 exec 41>&1 42>&2
 
 export DOCKER_GRAPHDRIVER=${DOCKER_GRAPHDRIVER:-vfs}
-export DOCKER_EXECDRIVER=${DOCKER_EXECDRIVER:-native}
 export DOCKER_USERLANDPROXY=${DOCKER_USERLANDPROXY:-true}
 
 # example usage: DOCKER_STORAGE_OPTS="dm.basesize=20G,dm.loopdatasize=200G"
@@ -26,6 +25,12 @@ if [ -n "$DOCKER_STORAGE_OPTS" ]; then
 	unset IFS
 fi
 
+# example usage: DOCKER_STORAGE_OPTS="dm.basesize=20G,dm.loopdatasize=200G"
+extra_params=""
+if [ "$DOCKER_REMAP_ROOT" ]; then
+	extra_params="--userns-remap $DOCKER_REMAP_ROOT"
+fi
+
 if [ -z "$DOCKER_TEST_HOST" ]; then
 	# Start apparmor if it is enabled
 	if [ -e "/sys/module/apparmor/parameters/enabled" ] && [ "$(cat /sys/module/apparmor/parameters/enabled)" == "Y" ]; then
@@ -35,20 +40,18 @@ if [ -z "$DOCKER_TEST_HOST" ]; then
 		(
 			set -x
 			/etc/init.d/apparmor start
-
-			/sbin/apparmor_parser -r -W -T contrib/apparmor/
 		)
 	fi
 
 	export DOCKER_HOST="unix://$(cd "$DEST" && pwd)/docker.sock" # "pwd" tricks to make sure $DEST is an absolute path, not a relative one
 	( set -x; exec \
-		docker --daemon --debug \
+		docker daemon --debug \
 		--host "$DOCKER_HOST" \
 		--storage-driver "$DOCKER_GRAPHDRIVER" \
-		--exec-driver "$DOCKER_EXECDRIVER" \
 		--pidfile "$DEST/docker.pid" \
 		--userland-proxy="$DOCKER_USERLANDPROXY" \
 		$storage_params \
+		$extra_params \
 			&> "$DEST/docker.log"
 	) &
 	# make sure that if the script exits unexpectedly, we stop this daemon we just started
@@ -57,11 +60,13 @@ else
 	export DOCKER_HOST="$DOCKER_TEST_HOST"
 fi
 
-# give it a second to come up so it's "ready"
-tries=10
+# give it a little time to come up so it's "ready"
+tries=60
+echo "INFO: Waiting for daemon to start..."
 while ! docker version &> /dev/null; do
 	(( tries-- ))
 	if [ $tries -le 0 ]; then
+		printf "\n"
 		if [ -z "$DOCKER_HOST" ]; then
 			echo >&2 "error: daemon failed to start"
 			echo >&2 "  check $DEST/docker.log for details"
@@ -71,5 +76,7 @@ while ! docker version &> /dev/null; do
 		fi
 		false
 	fi
+	printf "."
 	sleep 2
 done
+printf "\n"

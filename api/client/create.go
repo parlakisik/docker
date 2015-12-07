@@ -9,12 +9,12 @@ import (
 	"os"
 	"strings"
 
+	"github.com/docker/distribution/reference"
 	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/graph/tags"
-	"github.com/docker/docker/pkg/parsers"
+	Cli "github.com/docker/docker/cli"
 	"github.com/docker/docker/registry"
 	"github.com/docker/docker/runconfig"
-	"github.com/docker/docker/utils"
+	tagpkg "github.com/docker/docker/tag"
 )
 
 func (cli *DockerCli) pullImage(image string) error {
@@ -23,16 +23,28 @@ func (cli *DockerCli) pullImage(image string) error {
 
 func (cli *DockerCli) pullImageCustomOut(image string, out io.Writer) error {
 	v := url.Values{}
-	repos, tag := parsers.ParseRepositoryTag(image)
-	// pull only the image tagged 'latest' if no tag was specified
-	if tag == "" {
-		tag = tags.DEFAULTTAG
+
+	ref, err := reference.ParseNamed(image)
+	if err != nil {
+		return err
 	}
-	v.Set("fromImage", repos)
+
+	var tag string
+	switch x := ref.(type) {
+	case reference.Digested:
+		tag = x.Digest().String()
+	case reference.Tagged:
+		tag = x.Tag()
+	default:
+		// pull only the image tagged 'latest' if no tag was specified
+		tag = tagpkg.DefaultTag
+	}
+
+	v.Set("fromImage", ref.Name())
 	v.Set("tag", tag)
 
 	// Resolve the Repository name from fqn to RepositoryInfo
-	repoInfo, err := registry.ParseRepositoryInfo(repos)
+	repoInfo, err := registry.ParseRepositoryInfo(ref)
 	if err != nil {
 		return err
 	}
@@ -94,19 +106,48 @@ func (cli *DockerCli) createContainer(config *runconfig.Config, hostConfig *runc
 		defer containerIDFile.Close()
 	}
 
+	ref, err := reference.ParseNamed(config.Image)
+	if err != nil {
+		return nil, err
+	}
+
+	isDigested := false
+	switch ref.(type) {
+	case reference.Tagged:
+	case reference.Digested:
+		isDigested = true
+	default:
+		ref, err = reference.WithTag(ref, tagpkg.DefaultTag)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	var trustedRef reference.Canonical
+
+	if isTrusted() && !isDigested {
+		var err error
+		trustedRef, err = cli.trustedReference(ref.(reference.NamedTagged))
+		if err != nil {
+			return nil, err
+		}
+		config.Image = trustedRef.String()
+	}
+
 	//create the container
 	serverResp, err := cli.call("POST", "/containers/create?"+containerValues.Encode(), mergedConfig, nil)
 	//if image not found try to pull it
 	if serverResp.statusCode == 404 && strings.Contains(err.Error(), config.Image) {
-		repo, tag := parsers.ParseRepositoryTag(config.Image)
-		if tag == "" {
-			tag = tags.DEFAULTTAG
-		}
-		fmt.Fprintf(cli.err, "Unable to find image '%s' locally\n", utils.ImageReference(repo, tag))
+		fmt.Fprintf(cli.err, "Unable to find image '%s' locally\n", ref.String())
 
 		// we don't want to write to stdout anything apart from container.ID
 		if err = cli.pullImageCustomOut(config.Image, cli.err); err != nil {
 			return nil, err
+		}
+		if trustedRef != nil && !isDigested {
+			if err := cli.tagTrusted(trustedRef, ref.(reference.NamedTagged)); err != nil {
+				return nil, err
+			}
 		}
 		// Retry
 		if serverResp, err = cli.call("POST", "/containers/create?"+containerValues.Encode(), mergedConfig, nil); err != nil {
@@ -137,7 +178,8 @@ func (cli *DockerCli) createContainer(config *runconfig.Config, hostConfig *runc
 //
 // Usage: docker create [OPTIONS] IMAGE [COMMAND] [ARG...]
 func (cli *DockerCli) CmdCreate(args ...string) error {
-	cmd := cli.Subcmd("create", []string{"IMAGE [COMMAND] [ARG...]"}, "Create a new container", true)
+	cmd := Cli.Subcmd("create", []string{"IMAGE [COMMAND] [ARG...]"}, Cli.DockerCommands["create"].Description, true)
+	addTrustedFlags(cmd, true)
 
 	// These are flags not stored in Config/HostConfig
 	var (

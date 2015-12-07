@@ -1,11 +1,13 @@
 package client
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 
+	"github.com/docker/distribution/reference"
+	Cli "github.com/docker/docker/cli"
 	flag "github.com/docker/docker/pkg/mflag"
-	"github.com/docker/docker/pkg/parsers"
 	"github.com/docker/docker/registry"
 )
 
@@ -13,15 +15,27 @@ import (
 //
 // Usage: docker push NAME[:TAG]
 func (cli *DockerCli) CmdPush(args ...string) error {
-	cmd := cli.Subcmd("push", []string{"NAME[:TAG]"}, "Push an image or a repository to a registry", true)
+	cmd := Cli.Subcmd("push", []string{"NAME[:TAG]"}, Cli.DockerCommands["push"].Description, true)
+	addTrustedFlags(cmd, false)
 	cmd.Require(flag.Exact, 1)
 
 	cmd.ParseFlags(args, true)
 
-	remote, tag := parsers.ParseRepositoryTag(cmd.Arg(0))
+	ref, err := reference.ParseNamed(cmd.Arg(0))
+	if err != nil {
+		return err
+	}
+
+	var tag string
+	switch x := ref.(type) {
+	case reference.Digested:
+		return errors.New("cannot push a digest reference")
+	case reference.Tagged:
+		tag = x.Tag()
+	}
 
 	// Resolve the Repository name from fqn to RepositoryInfo
-	repoInfo, err := registry.ParseRepositoryInfo(remote)
+	repoInfo, err := registry.ParseRepositoryInfo(ref)
 	if err != nil {
 		return err
 	}
@@ -39,9 +53,13 @@ func (cli *DockerCli) CmdPush(args ...string) error {
 		return fmt.Errorf("You cannot push a \"root\" repository. Please rename your repository to <user>/<repo> (ex: %s/%s)", username, repoInfo.LocalName)
 	}
 
+	if isTrusted() {
+		return cli.trustedPush(repoInfo, tag, authConfig)
+	}
+
 	v := url.Values{}
 	v.Set("tag", tag)
 
-	_, _, err = cli.clientRequestAttemptLogin("POST", "/images/"+remote+"/push?"+v.Encode(), nil, cli.out, repoInfo.Index, "push")
+	_, _, err = cli.clientRequestAttemptLogin("POST", "/images/"+ref.Name()+"/push?"+v.Encode(), nil, cli.out, repoInfo.Index, "push")
 	return err
 }

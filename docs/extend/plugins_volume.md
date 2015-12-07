@@ -52,13 +52,15 @@ containers.
 **Request**:
 ```
 {
-    "Name": "volume_name"
+    "Name": "volume_name",
+    "Opts": {}
 }
 ```
 
 Instruct the plugin that the user wants to create a volume, given a user
 specified volume name.  The plugin does not need to actually manifest the
 volume on the filesystem yet (until Mount is called).
+Opts is a map of driver specific options passed through from the user request.
 
 **Response**:
 ```
@@ -78,7 +80,7 @@ Respond with a string error if an error occurred.
 }
 ```
 
-Create a volume, given a user specified volume name.
+Delete the specified volume from disk. This request is issued when a user invokes `docker rm -v` to remove volumes associated with a container.
 
 **Response**:
 ```
@@ -99,7 +101,9 @@ Respond with a string error if an error occurred.
 ```
 
 Docker requires the plugin to provide a volume, given a user specified volume
-name. This is called once per container start.
+name. This is called once per container start. If the same volume_name is requested
+more than once, the plugin may need to keep track of each new mount request and provision
+at the first mount request and deprovision at the last corresponding unmount request.
 
 **Response**:
 ```

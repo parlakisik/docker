@@ -1,25 +1,27 @@
 <!--[metadata]>
 +++
-title = "Dockerizing applications: A 'Hello world'"
+title = "Hello world in a container"
 description = "A simple 'Hello world' exercise that introduced you to Docker."
 keywords = ["docker guide, docker, docker platform, virtualization framework, how to, dockerize, dockerizing apps, dockerizing applications, container,  containers"]
 [menu.main]
-parent = "smn_applied"
+parent="smn_containers"
+weight=-6
 +++
 <![end-metadata]-->
 
-# Dockerizing applications: A "Hello world"
+# Hello world in a container
 
 *So what's this Docker thing all about?*
 
-Docker allows you to run applications inside containers. Running an
-application inside a container takes a single command: `docker run`.
+Docker allows you to run applications, worlds you create, inside containers.
+Running an application inside a container takes a single command: `docker run`.
 
-> **Note:** if you are using a remote Docker daemon, such as Boot2Docker, 
-> then _do not_ type the `sudo` before the `docker` commands shown in the
-> documentation's examples.
+>**Note**: Depending on your Docker system configuration, you may be required to
+>preface each `docker` command on this page with `sudo`. To avoid this behavior,
+>your system administrator can create a Unix group called `docker` and add users
+>to it.
 
-## Hello world
+## Run a Hello world
 
 Let's try it now.
 
@@ -131,9 +133,9 @@ a really long string:
 This really long string is called a *container ID*. It uniquely
 identifies a container so we can work with it.
 
-> **Note:** 
-> The container ID is a bit long and unwieldy and a bit later
-> on we'll see a shorter ID and some ways to name our containers to make
+> **Note:**
+> The container ID is a bit long and unwieldy. A bit later,
+> we'll see a shorter ID and ways to name our containers to make
 > working with them easier.
 
 We can use this container ID to see what's happening with our `hello world` daemon.
@@ -153,14 +155,14 @@ information about it, starting with a shorter variant of its container ID:
 
 We can also see the image we used to build it, `ubuntu:14.04`, the command it
 is running, its status and an automatically assigned name,
-`insane_babbage`. 
+`insane_babbage`.
 
-> **Note:** 
-> Docker automatically names any containers you start, a
-> little later on we'll see how you can specify your own names.
+> **Note:**
+> Docker automatically generates names for any containers started.
+> We'll see how to specify your own names a bit later.
 
-Okay, so we now know it's running. But is it doing what we asked it to do? To see this
-we're going to look inside the container using the `docker logs`
+Okay, so we now know it's running. But is it doing what we asked it to do? To
+see this we're going to look inside the container using the `docker logs`
 command. Let's use the container name Docker assigned.
 
     $ docker logs insane_babbage
@@ -176,7 +178,7 @@ Awesome! Our daemon is working and we've just created our first
 Dockerized application!
 
 Now we've established we can create our own containers let's tidy up
-after ourselves and stop our daemonized container. To do this we use the
+after ourselves and stop our detached container. To do this we use the
 `docker stop` command.
 
     $ docker stop insane_babbage
@@ -195,8 +197,15 @@ Excellent. Our container has been stopped.
 
 # Next steps
 
-Now we've seen how simple it is to get started with Docker. Let's learn how to
-do some more advanced tasks.
+So far, you launched your first containers using the `docker run` command. You
+ran an *interactive container* that ran in the foreground. You also ran a
+*detached container* that ran in the background. In the process you learned
+about several Docker commands:
 
-Go to [Working With Containers](/userguide/usingdocker).
+* `docker ps` - Lists containers.
+* `docker logs` - Shows us the standard output of a container.
+* `docker stop` - Stops running containers.
 
+Now, you have the basis learn more about Docker and how to do some more advanced
+tasks. Go to ["*Run a simple application*"](usingdocker.md) to actually build a
+web application with the Docker client.

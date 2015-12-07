@@ -5,7 +5,6 @@ description = "The events command description and usage"
 keywords = ["events, container, report"]
 [menu.main]
 parent = "smn_cli"
-weight=1
 +++
 <![end-metadata]-->
 
@@ -16,26 +15,35 @@ weight=1
     Get real time events from the server
 
       -f, --filter=[]    Filter output based on conditions provided
+      --help=false       Print usage
       --since=""         Show all events created since timestamp
       --until=""         Stream events until this timestamp
 
 Docker containers will report the following events:
 
-    create, destroy, die, export, kill, oom, pause, restart, start, stop, unpause
+    attach, commit, copy, create, destroy, die, exec_create, exec_start, export, kill, oom, pause, rename, resize, restart, start, stop, top, unpause
 
 and Docker images will report:
 
-    untag, delete
+    delete, import, pull, push, tag, untag
 
-The `--since` and `--until` parameters can be Unix timestamps, RFC3339
-dates or Go duration strings (e.g. `10m`, `1h30m`) computed relative to
-client machine’s time. If you do not provide the --since option, the command
-returns only new and/or live events.
+The `--since` and `--until` parameters can be Unix timestamps, date formated
+timestamps, or Go duration strings (e.g. `10m`, `1h30m`) computed
+relative to the client machine’s time. If you do not provide the --since option,
+the command returns only new and/or live events.  Supported formats for date
+formated time stamps include RFC3339Nano, RFC3339, `2006-01-02T15:04:05`,
+`2006-01-02T15:04:05.999999999`, `2006-01-02Z07:00`, and `2006-01-02`. The local
+timezone on the client will be used if you do not provide either a `Z` or a
+`+-00:00` timezone offset at the end of the timestamp.  When providing Unix
+timestamps enter seconds[.nanoseconds], where seconds is the number of seconds
+that have elapsed since January 1, 1970 (midnight UTC/GMT), not counting leap
+seconds (aka Unix epoch or Unix time), and the optional .nanoseconds field is a
+fraction of a second no more than nine digits long.
 
 ## Filtering
 
 The filtering flag (`-f` or `--filter`) format is of "key=value". If you would
-like to use multiple filters, pass multiple flags (e.g., 
+like to use multiple filters, pass multiple flags (e.g.,
 `--filter "foo=bar" --filter "bif=baz"`)
 
 Using the same filter multiple times will be handled as a *OR*; for example
@@ -48,9 +56,10 @@ container container 588a23dac085 *AND* the event type is *start*
 
 The currently supported filters are:
 
-* container
-* event
-* image
+* container (`container=<name or id>`)
+* event (`event=<event type>`)
+* image (`image=<tag or id>`)
+* label (`label=<key>` or `label=<key>=<value>`)
 
 ## Examples
 
@@ -133,4 +142,3 @@ relative to the current time on the client machine:
     2014-05-10T17:42:14.999999999Z07:00 4386fb97867d: (from ubuntu-1:14.04) stop
     2014-05-10T17:42:14.999999999Z07:00 7805c1d35632: (from redis:2.8) die
     2014-09-03T15:49:29.999999999Z07:00 7805c1d35632: (from redis:2.8) stop
-
