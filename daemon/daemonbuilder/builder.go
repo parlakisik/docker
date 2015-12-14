@@ -21,7 +21,6 @@ import (
 	"github.com/docker/docker/pkg/httputils"
 	"github.com/docker/docker/pkg/idtools"
 	"github.com/docker/docker/pkg/ioutils"
-	"github.com/docker/docker/pkg/progressreader"
 	"github.com/docker/docker/pkg/urlutil"
 	"github.com/docker/docker/registry"
 	"github.com/docker/docker/runconfig"
@@ -83,7 +82,7 @@ func (d Docker) Pull(name string) (*image.Image, error) {
 
 // Container looks up a Docker container referenced by `id`.
 func (d Docker) Container(id string) (*container.Container, error) {
-	return d.Daemon.Get(id)
+	return d.Daemon.GetContainer(id)
 }
 
 // Create creates a new Docker container and returns potential warnings
@@ -97,7 +96,7 @@ func (d Docker) Create(cfg *runconfig.Config, hostCfg *runconfig.HostConfig) (*c
 	if err != nil {
 		return nil, nil, err
 	}
-	container, err := d.Daemon.Get(ccr.ID)
+	container, err := d.Container(ccr.ID)
 	if err != nil {
 		return nil, ccr.Warnings, err
 	}
@@ -239,7 +238,7 @@ func (d Docker) Start(c *container.Container) error {
 // DetectContextFromRemoteURL returns a context and in certain cases the name of the dockerfile to be used
 // irrespective of user input.
 // progressReader is only used if remoteURL is actually a URL (not empty, and not a Git endpoint).
-func DetectContextFromRemoteURL(r io.ReadCloser, remoteURL string, progressReader *progressreader.Config) (context builder.ModifiableContext, dockerfileName string, err error) {
+func DetectContextFromRemoteURL(r io.ReadCloser, remoteURL string, createProgressReader func(in io.ReadCloser) io.ReadCloser) (context builder.ModifiableContext, dockerfileName string, err error) {
 	switch {
 	case remoteURL == "":
 		context, err = builder.MakeTarSumContext(r)
@@ -262,8 +261,7 @@ func DetectContextFromRemoteURL(r io.ReadCloser, remoteURL string, progressReade
 			},
 			// fallback handler (tar context)
 			"": func(rc io.ReadCloser) (io.ReadCloser, error) {
-				progressReader.In = rc
-				return progressReader, nil
+				return createProgressReader(rc), nil
 			},
 		})
 	default:

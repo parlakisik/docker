@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Sirupsen/logrus"
+	networktypes "github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/container"
 	"github.com/docker/docker/daemon/execdriver"
 	"github.com/docker/docker/daemon/links"
@@ -199,7 +200,11 @@ func (daemon *Daemon) populateCommand(c *container.Container, env []string) erro
 		BlkioThrottleReadBpsDevice:  readBpsDevice,
 		BlkioThrottleWriteBpsDevice: writeBpsDevice,
 		OomKillDisable:              c.HostConfig.OomKillDisable,
-		MemorySwappiness:            *c.HostConfig.MemorySwappiness,
+		MemorySwappiness:            -1,
+	}
+
+	if c.HostConfig.MemorySwappiness != nil {
+		resources.MemorySwappiness = *c.HostConfig.MemorySwappiness
 	}
 
 	processConfig := execdriver.ProcessConfig{
@@ -412,7 +417,7 @@ func (daemon *Daemon) buildSandboxOptions(container *container.Container, n libn
 			continue
 		}
 
-		c, err := daemon.Get(ref.ParentID)
+		c, err := daemon.GetContainer(ref.ParentID)
 		if err != nil {
 			logrus.Error(err)
 		}
@@ -440,7 +445,7 @@ func (daemon *Daemon) buildSandboxOptions(container *container.Container, n libn
 
 func (daemon *Daemon) updateNetworkSettings(container *container.Container, n libnetwork.Network) error {
 	if container.NetworkSettings == nil {
-		container.NetworkSettings = &network.Settings{Networks: make(map[string]*network.EndpointSettings)}
+		container.NetworkSettings = &network.Settings{Networks: make(map[string]*networktypes.EndpointSettings)}
 	}
 
 	if !container.HostConfig.NetworkMode.IsHost() && runconfig.NetworkMode(n.Type()).IsHost() {
@@ -466,7 +471,7 @@ func (daemon *Daemon) updateNetworkSettings(container *container.Container, n li
 			return runconfig.ErrConflictNoNetwork
 		}
 	}
-	container.NetworkSettings.Networks[n.Name()] = new(network.EndpointSettings)
+	container.NetworkSettings.Networks[n.Name()] = new(networktypes.EndpointSettings)
 
 	return nil
 }
@@ -550,8 +555,8 @@ func (daemon *Daemon) allocateNetwork(container *container.Container) error {
 			}
 			networkName = n.Name()
 		}
-		container.NetworkSettings.Networks = make(map[string]*network.EndpointSettings)
-		container.NetworkSettings.Networks[networkName] = new(network.EndpointSettings)
+		container.NetworkSettings.Networks = make(map[string]*networktypes.EndpointSettings)
+		container.NetworkSettings.Networks[networkName] = new(networktypes.EndpointSettings)
 		updateSettings = true
 	}
 
@@ -780,7 +785,7 @@ func (daemon *Daemon) setNetworkNamespaceKey(containerID string, pid int) error 
 
 func (daemon *Daemon) getIpcContainer(container *container.Container) (*container.Container, error) {
 	containerID := container.HostConfig.IpcMode.Container()
-	c, err := daemon.Get(containerID)
+	c, err := daemon.GetContainer(containerID)
 	if err != nil {
 		return nil, err
 	}
@@ -791,7 +796,7 @@ func (daemon *Daemon) getIpcContainer(container *container.Container) (*containe
 }
 
 func (daemon *Daemon) getNetworkedContainer(containerID, connectedContainerID string) (*container.Container, error) {
-	nc, err := daemon.Get(connectedContainerID)
+	nc, err := daemon.GetContainer(connectedContainerID)
 	if err != nil {
 		return nil, err
 	}
@@ -812,7 +817,7 @@ func (daemon *Daemon) releaseNetwork(container *container.Container) {
 	sid := container.NetworkSettings.SandboxID
 	networks := container.NetworkSettings.Networks
 	for n := range networks {
-		networks[n] = &network.EndpointSettings{}
+		networks[n] = &networktypes.EndpointSettings{}
 	}
 
 	container.NetworkSettings = &network.Settings{Networks: networks}
