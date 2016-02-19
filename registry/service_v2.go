@@ -2,26 +2,33 @@ package registry
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 
-	"github.com/docker/distribution/reference"
-	"github.com/docker/distribution/registry/client/auth"
-	"github.com/docker/docker/pkg/tlsconfig"
+	"github.com/docker/docker/reference"
+	"github.com/docker/go-connections/tlsconfig"
 )
 
 func (s *Service) lookupV2Endpoints(repoName reference.Named) (endpoints []APIEndpoint, err error) {
 	var cfg = tlsconfig.ServerDefault
 	tlsConfig := &cfg
-	nameString := repoName.Name()
+	nameString := repoName.FullName()
 	if strings.HasPrefix(nameString, DefaultNamespace+"/") {
 		// v2 mirrors
 		for _, mirror := range s.Config.Mirrors {
-			mirrorTLSConfig, err := s.tlsConfigForMirror(mirror)
+			if !strings.HasPrefix(mirror, "http://") && !strings.HasPrefix(mirror, "https://") {
+				mirror = "https://" + mirror
+			}
+			mirrorURL, err := url.Parse(mirror)
+			if err != nil {
+				return nil, err
+			}
+			mirrorTLSConfig, err := s.tlsConfigForMirror(mirrorURL)
 			if err != nil {
 				return nil, err
 			}
 			endpoints = append(endpoints, APIEndpoint{
-				URL: mirror,
+				URL: mirrorURL,
 				// guess mirrors are v2
 				Version:      APIVersion2,
 				Mirror:       true,
@@ -52,32 +59,28 @@ func (s *Service) lookupV2Endpoints(repoName reference.Named) (endpoints []APIEn
 		return nil, err
 	}
 
-	v2Versions := []auth.APIVersion{
-		{
-			Type:    "registry",
-			Version: "2.0",
-		},
-	}
 	endpoints = []APIEndpoint{
 		{
-			URL:           "https://" + hostname,
-			Version:       APIVersion2,
-			TrimHostname:  true,
-			TLSConfig:     tlsConfig,
-			VersionHeader: DefaultRegistryVersionHeader,
-			Versions:      v2Versions,
+			URL: &url.URL{
+				Scheme: "https",
+				Host:   hostname,
+			},
+			Version:      APIVersion2,
+			TrimHostname: true,
+			TLSConfig:    tlsConfig,
 		},
 	}
 
 	if tlsConfig.InsecureSkipVerify {
 		endpoints = append(endpoints, APIEndpoint{
-			URL:          "http://" + hostname,
+			URL: &url.URL{
+				Scheme: "http",
+				Host:   hostname,
+			},
 			Version:      APIVersion2,
 			TrimHostname: true,
 			// used to check if supposed to be secure via InsecureSkipVerify
-			TLSConfig:     tlsConfig,
-			VersionHeader: DefaultRegistryVersionHeader,
-			Versions:      v2Versions,
+			TLSConfig: tlsConfig,
 		})
 	}
 

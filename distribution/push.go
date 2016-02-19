@@ -7,17 +7,14 @@ import (
 	"io"
 
 	"github.com/Sirupsen/logrus"
-	"github.com/docker/distribution/digest"
-	"github.com/docker/distribution/reference"
-	"github.com/docker/docker/cliconfig"
-	"github.com/docker/docker/daemon/events"
 	"github.com/docker/docker/distribution/metadata"
 	"github.com/docker/docker/distribution/xfer"
 	"github.com/docker/docker/image"
 	"github.com/docker/docker/layer"
 	"github.com/docker/docker/pkg/progress"
+	"github.com/docker/docker/reference"
 	"github.com/docker/docker/registry"
-	"github.com/docker/docker/tag"
+	"github.com/docker/engine-api/types"
 	"github.com/docker/libtrust"
 	"golang.org/x/net/context"
 )
@@ -25,19 +22,18 @@ import (
 // ImagePushConfig stores push configuration.
 type ImagePushConfig struct {
 	// MetaHeaders store HTTP headers with metadata about the image
-	// (DockerHeaders with prefix X-Meta- in the request).
 	MetaHeaders map[string][]string
 	// AuthConfig holds authentication credentials for authenticating with
 	// the registry.
-	AuthConfig *cliconfig.AuthConfig
+	AuthConfig *types.AuthConfig
 	// ProgressOutput is the interface for showing the status of the push
 	// operation.
 	ProgressOutput progress.Output
 	// RegistryService is the registry service to use for TLS configuration
 	// and endpoint lookup.
 	RegistryService *registry.Service
-	// EventsService is the events service to use for logging.
-	EventsService *events.Events
+	// ImageEventLogger notifies events for a given image
+	ImageEventLogger func(id, name, action string)
 	// MetadataStore is the storage backend for distribution-specific
 	// metadata.
 	MetadataStore metadata.Store
@@ -45,8 +41,8 @@ type ImagePushConfig struct {
 	LayerStore layer.Store
 	// ImageStore manages images.
 	ImageStore image.Store
-	// TagStore manages tags.
-	TagStore tag.Store
+	// ReferenceStore manages tags.
+	ReferenceStore reference.Store
 	// TrustKey is the private key for legacy signatures. This is typically
 	// an ephemeral key, since these signatures are no longer verified.
 	TrustKey libtrust.PrivateKey
@@ -60,7 +56,7 @@ type Pusher interface {
 	// Push returns an error if any, as well as a boolean that determines whether to retry Push on the next configured endpoint.
 	//
 	// TODO(tiborvass): have Push() take a reference to repository + tag, so that the pusher itself is repository-agnostic.
-	Push(ctx context.Context) (fallback bool, err error)
+	Push(ctx context.Context) error
 }
 
 const compressionBufSize = 32768
@@ -74,12 +70,11 @@ func NewPusher(ref reference.Named, endpoint registry.APIEndpoint, repoInfo *reg
 	switch endpoint.Version {
 	case registry.APIVersion2:
 		return &v2Pusher{
-			blobSumService: metadata.NewBlobSumService(imagePushConfig.MetadataStore),
-			ref:            ref,
-			endpoint:       endpoint,
-			repoInfo:       repoInfo,
-			config:         imagePushConfig,
-			layersPushed:   pushMap{layersPushed: make(map[digest.Digest]bool)},
+			v2MetadataService: metadata.NewV2MetadataService(imagePushConfig.MetadataStore),
+			ref:               ref,
+			endpoint:          endpoint,
+			repoInfo:          repoInfo,
+			config:            imagePushConfig,
 		}, nil
 	case registry.APIVersion1:
 		return &v1Pusher{
@@ -105,51 +100,80 @@ func Push(ctx context.Context, ref reference.Named, imagePushConfig *ImagePushCo
 		return err
 	}
 
-	endpoints, err := imagePushConfig.RegistryService.LookupPushEndpoints(repoInfo.CanonicalName)
+	endpoints, err := imagePushConfig.RegistryService.LookupPushEndpoints(repoInfo)
 	if err != nil {
 		return err
 	}
 
-	progress.Messagef(imagePushConfig.ProgressOutput, "", "The push refers to a repository [%s]", repoInfo.CanonicalName.String())
+	progress.Messagef(imagePushConfig.ProgressOutput, "", "The push refers to a repository [%s]", repoInfo.FullName())
 
-	associations := imagePushConfig.TagStore.ReferencesByName(repoInfo.LocalName)
+	associations := imagePushConfig.ReferenceStore.ReferencesByName(repoInfo)
 	if len(associations) == 0 {
-		return fmt.Errorf("Repository does not exist: %s", repoInfo.LocalName)
+		return fmt.Errorf("Repository does not exist: %s", repoInfo.Name())
 	}
 
-	var lastErr error
+	var (
+		lastErr error
+
+		// confirmedV2 is set to true if a push attempt managed to
+		// confirm that it was talking to a v2 registry. This will
+		// prevent fallback to the v1 protocol.
+		confirmedV2 bool
+
+		// confirmedTLSRegistries is a map indicating which registries
+		// are known to be using TLS. There should never be a plaintext
+		// retry for any of these.
+		confirmedTLSRegistries = make(map[string]struct{})
+	)
+
 	for _, endpoint := range endpoints {
-		logrus.Debugf("Trying to push %s to %s %s", repoInfo.CanonicalName, endpoint.URL, endpoint.Version)
+		if confirmedV2 && endpoint.Version == registry.APIVersion1 {
+			logrus.Debugf("Skipping v1 endpoint %s because v2 registry was detected", endpoint.URL)
+			continue
+		}
+
+		if endpoint.URL.Scheme != "https" {
+			if _, confirmedTLS := confirmedTLSRegistries[endpoint.URL.Host]; confirmedTLS {
+				logrus.Debugf("Skipping non-TLS endpoint %s for host/port that appears to use TLS", endpoint.URL)
+				continue
+			}
+		}
+
+		logrus.Debugf("Trying to push %s to %s %s", repoInfo.FullName(), endpoint.URL, endpoint.Version)
 
 		pusher, err := NewPusher(ref, endpoint, repoInfo, imagePushConfig)
 		if err != nil {
 			lastErr = err
 			continue
 		}
-		if fallback, err := pusher.Push(ctx); err != nil {
+		if err := pusher.Push(ctx); err != nil {
 			// Was this push cancelled? If so, don't try to fall
 			// back.
 			select {
 			case <-ctx.Done():
-				fallback = false
 			default:
+				if fallbackErr, ok := err.(fallbackError); ok {
+					confirmedV2 = confirmedV2 || fallbackErr.confirmedV2
+					if fallbackErr.transportOK && endpoint.URL.Scheme == "https" {
+						confirmedTLSRegistries[endpoint.URL.Host] = struct{}{}
+					}
+					err = fallbackErr.err
+					lastErr = err
+					logrus.Errorf("Attempting next endpoint for push after error: %v", err)
+					continue
+				}
 			}
 
-			if fallback {
-				lastErr = err
-				continue
-			}
-			logrus.Debugf("Not continuing with error: %v", err)
+			logrus.Errorf("Not continuing with push after error: %v", err)
 			return err
-
 		}
 
-		imagePushConfig.EventsService.Log("push", repoInfo.LocalName.Name(), "")
+		imagePushConfig.ImageEventLogger(ref.String(), repoInfo.Name(), "push")
 		return nil
 	}
 
 	if lastErr == nil {
-		lastErr = fmt.Errorf("no endpoints found for %s", repoInfo.CanonicalName)
+		lastErr = fmt.Errorf("no endpoints found for %s", repoInfo.FullName())
 	}
 	return lastErr
 }
@@ -162,7 +186,14 @@ func Push(ctx context.Context, ref reference.Named, imagePushConfig *ImagePushCo
 // argument so that it can be used with httpBlobWriter's ReadFrom method.
 // Using httpBlobWriter's Write method would send a PATCH request for every
 // Write call.
-func compress(in io.Reader) io.ReadCloser {
+//
+// The second return value is a channel that gets closed when the goroutine
+// is finished. This allows the caller to make sure the goroutine finishes
+// before it releases any resources connected with the reader that was
+// passed in.
+func compress(in io.Reader) (io.ReadCloser, chan struct{}) {
+	compressionDone := make(chan struct{})
+
 	pipeReader, pipeWriter := io.Pipe()
 	// Use a bufio.Writer to avoid excessive chunking in HTTP request.
 	bufWriter := bufio.NewWriterSize(pipeWriter, compressionBufSize)
@@ -181,7 +212,8 @@ func compress(in io.Reader) io.ReadCloser {
 		} else {
 			pipeWriter.Close()
 		}
+		close(compressionDone)
 	}()
 
-	return pipeReader
+	return pipeReader, compressionDone
 }

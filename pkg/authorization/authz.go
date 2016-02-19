@@ -1,13 +1,18 @@
 package authorization
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"strings"
+
+	"github.com/Sirupsen/logrus"
+	"github.com/docker/docker/pkg/ioutils"
 )
+
+const maxBodySize = 1048576 // 1MB
 
 // NewCtx creates new authZ context, it is used to store authorization information related to a specific docker
 // REST http session
@@ -26,7 +31,13 @@ import (
 // For response manipulation, the response from each plugin is piped between plugins. Plugin execution order
 // is determined according to daemon parameters
 func NewCtx(authZPlugins []Plugin, user, userAuthNMethod, requestMethod, requestURI string) *Ctx {
-	return &Ctx{plugins: authZPlugins, user: user, userAuthNMethod: userAuthNMethod, requestMethod: requestMethod, requestURI: requestURI}
+	return &Ctx{
+		plugins:         authZPlugins,
+		user:            user,
+		userAuthNMethod: userAuthNMethod,
+		requestMethod:   requestMethod,
+		requestURI:      requestURI,
+	}
 }
 
 // Ctx stores a a single request-response interaction context
@@ -41,48 +52,42 @@ type Ctx struct {
 }
 
 // AuthZRequest authorized the request to the docker daemon using authZ plugins
-func (a *Ctx) AuthZRequest(w http.ResponseWriter, r *http.Request) (err error) {
-
+func (ctx *Ctx) AuthZRequest(w http.ResponseWriter, r *http.Request) error {
 	var body []byte
-	if sendBody(a.requestURI, r.Header) {
-		var drainedBody io.ReadCloser
-		drainedBody, r.Body, err = drainBody(r.Body)
-		if err != nil {
-			return err
-		}
-		body, err = ioutil.ReadAll(drainedBody)
-		defer drainedBody.Close()
-
-		if err != nil {
-			return err
+	if sendBody(ctx.requestURI, r.Header) {
+		if r.ContentLength < maxBodySize {
+			var err error
+			body, r.Body, err = drainBody(r.Body)
+			if err != nil {
+				return err
+			}
 		}
 	}
 
 	var h bytes.Buffer
-	err = r.Header.Write(&h)
-
-	if err != nil {
+	if err := r.Header.Write(&h); err != nil {
 		return err
 	}
 
-	a.authReq = &Request{
-		User:            a.user,
-		UserAuthNMethod: a.userAuthNMethod,
-		RequestMethod:   a.requestMethod,
-		RequestURI:      a.requestURI,
+	ctx.authReq = &Request{
+		User:            ctx.user,
+		UserAuthNMethod: ctx.userAuthNMethod,
+		RequestMethod:   ctx.requestMethod,
+		RequestURI:      ctx.requestURI,
 		RequestBody:     body,
-		RequestHeaders:  headers(r.Header)}
+		RequestHeaders:  headers(r.Header),
+	}
 
-	for _, plugin := range a.plugins {
+	for _, plugin := range ctx.plugins {
+		logrus.Debugf("AuthZ request using plugin %s", plugin.Name())
 
-		authRes, err := plugin.AuthZRequest(a.authReq)
-
+		authRes, err := plugin.AuthZRequest(ctx.authReq)
 		if err != nil {
-			return err
+			return fmt.Errorf("plugin %s failed with error: %s", plugin.Name(), err)
 		}
 
 		if !authRes.Allow {
-			return fmt.Errorf(authRes.Msg)
+			return fmt.Errorf("authorization denied by plugin %s: %s", plugin.Name(), authRes.Msg)
 		}
 	}
 
@@ -90,49 +95,53 @@ func (a *Ctx) AuthZRequest(w http.ResponseWriter, r *http.Request) (err error) {
 }
 
 // AuthZResponse authorized and manipulates the response from docker daemon using authZ plugins
-func (a *Ctx) AuthZResponse(rm ResponseModifier, r *http.Request) error {
+func (ctx *Ctx) AuthZResponse(rm ResponseModifier, r *http.Request) error {
+	ctx.authReq.ResponseStatusCode = rm.StatusCode()
+	ctx.authReq.ResponseHeaders = headers(rm.Header())
 
-	a.authReq.ResponseStatusCode = rm.StatusCode()
-	a.authReq.ResponseHeaders = headers(rm.Header())
-
-	if sendBody(a.requestURI, rm.Header()) {
-		a.authReq.ResponseBody = rm.RawBody()
+	if sendBody(ctx.requestURI, rm.Header()) {
+		ctx.authReq.ResponseBody = rm.RawBody()
 	}
 
-	for _, plugin := range a.plugins {
+	for _, plugin := range ctx.plugins {
+		logrus.Debugf("AuthZ response using plugin %s", plugin.Name())
 
-		authRes, err := plugin.AuthZResponse(a.authReq)
-
+		authRes, err := plugin.AuthZResponse(ctx.authReq)
 		if err != nil {
-			return err
+			return fmt.Errorf("plugin %s failed with error: %s", plugin.Name(), err)
 		}
 
 		if !authRes.Allow {
-			return fmt.Errorf(authRes.Msg)
+			return fmt.Errorf("authorization denied by plugin %s: %s", plugin.Name(), authRes.Msg)
 		}
 	}
 
-	rm.Flush()
+	rm.FlushAll()
 
 	return nil
 }
 
 // drainBody dump the body, it reads the body data into memory and
 // see go sources /go/src/net/http/httputil/dump.go
-func drainBody(b io.ReadCloser) (r1, r2 io.ReadCloser, err error) {
-	var buf bytes.Buffer
-	if _, err = buf.ReadFrom(b); err != nil {
+func drainBody(body io.ReadCloser) ([]byte, io.ReadCloser, error) {
+	bufReader := bufio.NewReaderSize(body, maxBodySize)
+	newBody := ioutils.NewReadCloserWrapper(bufReader, func() error { return body.Close() })
+
+	data, err := bufReader.Peek(maxBodySize)
+	if err != io.EOF {
+		// This means the request is larger than our max
+		if err == bufio.ErrBufferFull {
+			return nil, newBody, nil
+		}
+		// This means we had an error reading
 		return nil, nil, err
 	}
-	if err = b.Close(); err != nil {
-		return nil, nil, err
-	}
-	return ioutil.NopCloser(&buf), ioutil.NopCloser(bytes.NewReader(buf.Bytes())), nil
+
+	return data, newBody, nil
 }
 
 // sendBody returns true when request/response body should be sent to AuthZPlugin
 func sendBody(url string, header http.Header) bool {
-
 	// Skip body for auth endpoint
 	if strings.HasSuffix(url, "/auth") {
 		return false

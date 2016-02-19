@@ -19,13 +19,14 @@ import (
 	"strings"
 
 	"github.com/Sirupsen/logrus"
-	"github.com/docker/distribution/reference"
-	"github.com/docker/docker/cliconfig"
+	"github.com/docker/distribution/registry/api/errcode"
 	"github.com/docker/docker/pkg/httputils"
 	"github.com/docker/docker/pkg/ioutils"
 	"github.com/docker/docker/pkg/stringid"
 	"github.com/docker/docker/pkg/tarsum"
-	"github.com/docker/docker/utils"
+	"github.com/docker/docker/reference"
+	"github.com/docker/engine-api/types"
+	registrytypes "github.com/docker/engine-api/types/registry"
 )
 
 var (
@@ -39,13 +40,13 @@ type Session struct {
 	indexEndpoint *Endpoint
 	client        *http.Client
 	// TODO(tiborvass): remove authConfig
-	authConfig *cliconfig.AuthConfig
+	authConfig *types.AuthConfig
 	id         string
 }
 
 type authTransport struct {
 	http.RoundTripper
-	*cliconfig.AuthConfig
+	*types.AuthConfig
 
 	alwaysSetBasicAuth bool
 	token              []string
@@ -67,7 +68,7 @@ type authTransport struct {
 // If the server sends a token without the client having requested it, it is ignored.
 //
 // This RoundTripper also has a CancelRequest method important for correct timeout handling.
-func AuthTransport(base http.RoundTripper, authConfig *cliconfig.AuthConfig, alwaysSetBasicAuth bool) http.RoundTripper {
+func AuthTransport(base http.RoundTripper, authConfig *types.AuthConfig, alwaysSetBasicAuth bool) http.RoundTripper {
 	if base == nil {
 		base = http.DefaultTransport
 	}
@@ -162,7 +163,7 @@ func (tr *authTransport) CancelRequest(req *http.Request) {
 
 // NewSession creates a new session
 // TODO(tiborvass): remove authConfig param once registry client v2 is vendored
-func NewSession(client *http.Client, authConfig *cliconfig.AuthConfig, endpoint *Endpoint) (r *Session, err error) {
+func NewSession(client *http.Client, authConfig *types.AuthConfig, endpoint *Endpoint) (r *Session, err error) {
 	r = &Session{
 		authConfig:    authConfig,
 		client:        client,
@@ -213,7 +214,7 @@ func (r *Session) GetRemoteHistory(imgID, registry string) ([]string, error) {
 	defer res.Body.Close()
 	if res.StatusCode != 200 {
 		if res.StatusCode == 401 {
-			return nil, errLoginRequired
+			return nil, errcode.ErrorCodeUnauthorized.WithArgs()
 		}
 		return nil, httputils.NewHTTPRequestError(fmt.Sprintf("Server error: %d trying to fetch remote history for %s", res.StatusCode, imgID), res)
 	}
@@ -312,7 +313,7 @@ func (r *Session) GetRemoteImageLayer(imgID, registry string, imgSize int64) (io
 // argument, and returns data from the first one that answers the query
 // successfully.
 func (r *Session) GetRemoteTag(registries []string, repositoryRef reference.Named, askedTag string) (string, error) {
-	repository := repositoryRef.Name()
+	repository := repositoryRef.RemoteName()
 
 	if strings.Count(repository, "/") == 0 {
 		// This will be removed once the registry supports auto-resolution on
@@ -350,7 +351,7 @@ func (r *Session) GetRemoteTag(registries []string, repositoryRef reference.Name
 // the first one that answers the query successfully. It returns a map with
 // tag names as the keys and image IDs as the values.
 func (r *Session) GetRemoteTags(registries []string, repositoryRef reference.Named) (map[string]string, error) {
-	repository := repositoryRef.Name()
+	repository := repositoryRef.RemoteName()
 
 	if strings.Count(repository, "/") == 0 {
 		// This will be removed once the registry supports auto-resolution on
@@ -403,8 +404,8 @@ func buildEndpointsList(headers []string, indexEp string) ([]string, error) {
 }
 
 // GetRepositoryData returns lists of images and endpoints for the repository
-func (r *Session) GetRepositoryData(remote reference.Named) (*RepositoryData, error) {
-	repositoryTarget := fmt.Sprintf("%srepositories/%s/images", r.indexEndpoint.VersionString(1), remote.Name())
+func (r *Session) GetRepositoryData(name reference.Named) (*RepositoryData, error) {
+	repositoryTarget := fmt.Sprintf("%srepositories/%s/images", r.indexEndpoint.VersionString(1), name.RemoteName())
 
 	logrus.Debugf("[registry] Calling GET %s", repositoryTarget)
 
@@ -420,14 +421,14 @@ func (r *Session) GetRepositoryData(remote reference.Named) (*RepositoryData, er
 		// and return a non-obtuse error message for users
 		// "Get https://index.docker.io/v1/repositories/library/busybox/images: i/o timeout"
 		// was a top search on the docker user forum
-		if utils.IsTimeout(err) {
+		if isTimeout(err) {
 			return nil, fmt.Errorf("Network timed out while trying to connect to %s. You may want to check your internet connection or if you are behind a proxy.", repositoryTarget)
 		}
 		return nil, fmt.Errorf("Error while pulling image: %v", err)
 	}
 	defer res.Body.Close()
 	if res.StatusCode == 401 {
-		return nil, errLoginRequired
+		return nil, errcode.ErrorCodeUnauthorized.WithArgs()
 	}
 	// TODO: Right now we're ignoring checksums in the response body.
 	// In the future, we need to use them to check image validity.
@@ -438,7 +439,7 @@ func (r *Session) GetRepositoryData(remote reference.Named) (*RepositoryData, er
 		if err != nil {
 			logrus.Debugf("Error reading response body: %s", err)
 		}
-		return nil, httputils.NewHTTPRequestError(fmt.Sprintf("Error: Status %d trying to pull repository %s: %q", res.StatusCode, remote.Name(), errBody), res)
+		return nil, httputils.NewHTTPRequestError(fmt.Sprintf("Error: Status %d trying to pull repository %s: %q", res.StatusCode, name.RemoteName(), errBody), res)
 	}
 
 	var endpoints []string
@@ -593,7 +594,7 @@ func (r *Session) PushImageLayerRegistry(imgID string, layer io.Reader, registry
 func (r *Session) PushRegistryTag(remote reference.Named, revision, tag, registry string) error {
 	// "jsonify" the string
 	revision = "\"" + revision + "\""
-	path := fmt.Sprintf("repositories/%s/tags/%s", remote.Name(), tag)
+	path := fmt.Sprintf("repositories/%s/tags/%s", remote.RemoteName(), tag)
 
 	req, err := http.NewRequest("PUT", registry+path, strings.NewReader(revision))
 	if err != nil {
@@ -607,7 +608,7 @@ func (r *Session) PushRegistryTag(remote reference.Named, revision, tag, registr
 	}
 	res.Body.Close()
 	if res.StatusCode != 200 && res.StatusCode != 201 {
-		return httputils.NewHTTPRequestError(fmt.Sprintf("Internal server error: %d trying to push tag %s on %s", res.StatusCode, tag, remote.Name()), res)
+		return httputils.NewHTTPRequestError(fmt.Sprintf("Internal server error: %d trying to push tag %s on %s", res.StatusCode, tag, remote.RemoteName()), res)
 	}
 	return nil
 }
@@ -633,7 +634,7 @@ func (r *Session) PushImageJSONIndex(remote reference.Named, imgList []*ImgData,
 	if validate {
 		suffix = "images"
 	}
-	u := fmt.Sprintf("%srepositories/%s/%s", r.indexEndpoint.VersionString(1), remote.Name(), suffix)
+	u := fmt.Sprintf("%srepositories/%s/%s", r.indexEndpoint.VersionString(1), remote.RemoteName(), suffix)
 	logrus.Debugf("[registry] PUT %s", u)
 	logrus.Debugf("Image list pushed to index:\n%s", imgListJSON)
 	headers := map[string][]string{
@@ -661,7 +662,7 @@ func (r *Session) PushImageJSONIndex(remote reference.Named, imgList []*ImgData,
 	defer res.Body.Close()
 
 	if res.StatusCode == 401 {
-		return nil, errLoginRequired
+		return nil, errcode.ErrorCodeUnauthorized.WithArgs()
 	}
 
 	var tokens, endpoints []string
@@ -671,7 +672,7 @@ func (r *Session) PushImageJSONIndex(remote reference.Named, imgList []*ImgData,
 			if err != nil {
 				logrus.Debugf("Error reading response body: %s", err)
 			}
-			return nil, httputils.NewHTTPRequestError(fmt.Sprintf("Error: Status %d trying to push repository %s: %q", res.StatusCode, remote.Name(), errBody), res)
+			return nil, httputils.NewHTTPRequestError(fmt.Sprintf("Error: Status %d trying to push repository %s: %q", res.StatusCode, remote.RemoteName(), errBody), res)
 		}
 		tokens = res.Header["X-Docker-Token"]
 		logrus.Debugf("Auth token: %v", tokens)
@@ -689,7 +690,7 @@ func (r *Session) PushImageJSONIndex(remote reference.Named, imgList []*ImgData,
 			if err != nil {
 				logrus.Debugf("Error reading response body: %s", err)
 			}
-			return nil, httputils.NewHTTPRequestError(fmt.Sprintf("Error: Status %d trying to push checksums %s: %q", res.StatusCode, remote.Name(), errBody), res)
+			return nil, httputils.NewHTTPRequestError(fmt.Sprintf("Error: Status %d trying to push checksums %s: %q", res.StatusCode, remote.RemoteName(), errBody), res)
 		}
 	}
 
@@ -719,7 +720,7 @@ func shouldRedirect(response *http.Response) bool {
 }
 
 // SearchRepositories performs a search against the remote repository
-func (r *Session) SearchRepositories(term string) (*SearchResults, error) {
+func (r *Session) SearchRepositories(term string) (*registrytypes.SearchResults, error) {
 	logrus.Debugf("Index server: %s", r.indexEndpoint)
 	u := r.indexEndpoint.VersionString(1) + "search?q=" + url.QueryEscape(term)
 
@@ -737,20 +738,33 @@ func (r *Session) SearchRepositories(term string) (*SearchResults, error) {
 	if res.StatusCode != 200 {
 		return nil, httputils.NewHTTPRequestError(fmt.Sprintf("Unexpected status code %d", res.StatusCode), res)
 	}
-	result := new(SearchResults)
+	result := new(registrytypes.SearchResults)
 	return result, json.NewDecoder(res.Body).Decode(result)
 }
 
 // GetAuthConfig returns the authentication settings for a session
 // TODO(tiborvass): remove this once registry client v2 is vendored
-func (r *Session) GetAuthConfig(withPasswd bool) *cliconfig.AuthConfig {
+func (r *Session) GetAuthConfig(withPasswd bool) *types.AuthConfig {
 	password := ""
 	if withPasswd {
 		password = r.authConfig.Password
 	}
-	return &cliconfig.AuthConfig{
+	return &types.AuthConfig{
 		Username: r.authConfig.Username,
 		Password: password,
 		Email:    r.authConfig.Email,
 	}
+}
+
+func isTimeout(err error) bool {
+	type timeout interface {
+		Timeout() bool
+	}
+	e := err
+	switch urlErr := err.(type) {
+	case *url.Error:
+		e = urlErr.Err
+	}
+	t, ok := e.(timeout)
+	return ok && t.Timeout()
 }

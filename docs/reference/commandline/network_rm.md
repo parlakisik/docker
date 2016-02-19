@@ -14,7 +14,7 @@ parent = "smn_cli"
 
     Deletes one or more networks
 
-      --help=false       Print usage
+      --help             Print usage
 
 Removes one or more networks by name or identifier. To remove a network,
 you must first disconnect any containers connected to it.
@@ -25,7 +25,7 @@ To remove the network named 'my-network':
 ```
 
 To delete multiple networks in a single `docker network rm` command, provide
-multiple network names or id's. The following example deletes a network with id
+multiple network names or ids. The following example deletes a network with id
 `3695c422697f` and a network named `my-network`:
 
 ```bash
