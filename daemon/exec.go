@@ -1,15 +1,18 @@
 package daemon
 
 import (
+	"fmt"
 	"io"
 	"strings"
 	"time"
+
+	"golang.org/x/net/context"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/docker/container"
 	"github.com/docker/docker/daemon/exec"
 	"github.com/docker/docker/daemon/execdriver"
-	derr "github.com/docker/docker/errors"
+	"github.com/docker/docker/errors"
 	"github.com/docker/docker/pkg/pools"
 	"github.com/docker/docker/pkg/promise"
 	"github.com/docker/docker/pkg/term"
@@ -47,19 +50,19 @@ func (d *Daemon) getExecConfig(name string) (*exec.Config, error) {
 	if ec != nil {
 		if container := d.containers.Get(ec.ContainerID); container != nil {
 			if !container.IsRunning() {
-				return nil, derr.ErrorCodeContainerNotRunning.WithArgs(container.ID, container.State.String())
+				return nil, fmt.Errorf("Container %s is not running: %s", container.ID, container.State.String())
 			}
 			if container.IsPaused() {
-				return nil, derr.ErrorCodeExecPaused.WithArgs(container.ID)
+				return nil, errExecPaused(container.ID)
 			}
 			if container.IsRestarting() {
-				return nil, derr.ErrorCodeContainerRestarting.WithArgs(container.ID)
+				return nil, errContainerIsRestarting(container.ID)
 			}
 			return ec, nil
 		}
 	}
 
-	return nil, derr.ErrorCodeNoExecID.WithArgs(name)
+	return nil, errExecNotFound(name)
 }
 
 func (d *Daemon) unregisterExecCommand(container *container.Container, execConfig *exec.Config) {
@@ -74,13 +77,13 @@ func (d *Daemon) getActiveContainer(name string) (*container.Container, error) {
 	}
 
 	if !container.IsRunning() {
-		return nil, derr.ErrorCodeNotRunning.WithArgs(name)
+		return nil, errNotRunning{container.ID}
 	}
 	if container.IsPaused() {
-		return nil, derr.ErrorCodeExecPaused.WithArgs(name)
+		return nil, errExecPaused(name)
 	}
 	if container.IsRestarting() {
-		return nil, derr.ErrorCodeContainerRestarting.WithArgs(name)
+		return nil, errContainerIsRestarting(container.ID)
 	}
 	return container, nil
 }
@@ -92,8 +95,8 @@ func (d *Daemon) ContainerExecCreate(config *types.ExecConfig) (string, error) {
 		return "", err
 	}
 
-	cmd := strslice.New(config.Cmd...)
-	entrypoint, args := d.getEntrypointAndArgs(strslice.New(), cmd)
+	cmd := strslice.StrSlice(config.Cmd)
+	entrypoint, args := d.getEntrypointAndArgs(strslice.StrSlice{}, cmd)
 
 	keys := []byte{}
 	if config.DetachKeys != "" {
@@ -137,18 +140,19 @@ func (d *Daemon) ContainerExecStart(name string, stdin io.ReadCloser, stdout io.
 
 	ec, err := d.getExecConfig(name)
 	if err != nil {
-		return derr.ErrorCodeNoExecID.WithArgs(name)
+		return errExecNotFound(name)
 	}
 
 	ec.Lock()
 	if ec.ExitCode != nil {
 		ec.Unlock()
-		return derr.ErrorCodeExecExited.WithArgs(ec.ID)
+		err := fmt.Errorf("Error: Exec command %s has already run", ec.ID)
+		return errors.NewRequestConflictError(err)
 	}
 
 	if ec.Running {
 		ec.Unlock()
-		return derr.ErrorCodeExecRunning.WithArgs(ec.ID)
+		return fmt.Errorf("Error: Exec command %s is already running", ec.ID)
 	}
 	ec.Running = true
 	ec.Unlock()
@@ -157,7 +161,7 @@ func (d *Daemon) ContainerExecStart(name string, stdin io.ReadCloser, stdout io.
 	logrus.Debugf("starting exec command %s in container %s", ec.ID, c.ID)
 	d.LogContainerEvent(c, "exec_start: "+ec.ProcessConfig.Entrypoint+" "+strings.Join(ec.ProcessConfig.Arguments, " "))
 
-	if ec.OpenStdin {
+	if ec.OpenStdin && stdin != nil {
 		r, w := io.Pipe()
 		go func() {
 			defer w.Close()
@@ -179,7 +183,7 @@ func (d *Daemon) ContainerExecStart(name string, stdin io.ReadCloser, stdout io.
 		ec.NewNopInputPipe()
 	}
 
-	attachErr := container.AttachStreams(ec.StreamConfig, ec.OpenStdin, true, ec.ProcessConfig.Tty, cStdin, cStdout, cStderr, ec.DetachKeys)
+	attachErr := container.AttachStreams(context.Background(), ec.StreamConfig, ec.OpenStdin, true, ec.ProcessConfig.Tty, cStdin, cStdout, cStderr, ec.DetachKeys)
 
 	execErr := make(chan error)
 
@@ -194,12 +198,12 @@ func (d *Daemon) ContainerExecStart(name string, stdin io.ReadCloser, stdout io.
 	select {
 	case err := <-attachErr:
 		if err != nil {
-			return derr.ErrorCodeExecAttach.WithArgs(err)
+			return fmt.Errorf("attach failed with error: %v", err)
 		}
 		return nil
 	case err := <-execErr:
 		if aErr := <-attachErr; aErr != nil && err == nil {
-			return derr.ErrorCodeExecAttach.WithArgs(aErr)
+			return fmt.Errorf("attach failed with error: %v", aErr)
 		}
 		if err == nil {
 			return nil
@@ -207,9 +211,9 @@ func (d *Daemon) ContainerExecStart(name string, stdin io.ReadCloser, stdout io.
 
 		// Maybe the container stopped while we were trying to exec
 		if !c.IsRunning() {
-			return derr.ErrorCodeExecContainerStopped
+			return fmt.Errorf("container stopped while running exec: %s", c.ID)
 		}
-		return derr.ErrorCodeExecCantRun.WithArgs(ec.ID, c.ID, err)
+		return fmt.Errorf("Cannot run exec command %s in container %s: %s", ec.ID, c.ID, err)
 	}
 }
 
@@ -303,6 +307,9 @@ func (d *Daemon) monitorExec(container *container.Container, execConfig *exec.Co
 	}
 
 	if execConfig.ProcessConfig.Terminal != nil {
+		if err := execConfig.WaitResize(); err != nil {
+			logrus.Errorf("Error waiting for resize: %v", err)
+		}
 		if err := execConfig.ProcessConfig.Terminal.Close(); err != nil {
 			logrus.Errorf("Error closing terminal while running in container %s: %s", container.ID, err)
 		}

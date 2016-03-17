@@ -185,7 +185,7 @@ unix://[/path/to/socket] to use.
 **--label**="[]"
   Set key=value labels to the daemon (displayed in `docker info`)
 
-**--log-driver**="*json-file*|*syslog*|*journald*|*gelf*|*fluentd*|*awslogs*|*splunk*|*etwlogs*|*none*"
+**--log-driver**="*json-file*|*syslog*|*journald*|*gelf*|*fluentd*|*awslogs*|*splunk*|*etwlogs*|*gcplogs*|*none*"
   Default driver for container logs. Default is `json-file`.
   **Warning**: `docker logs` command works only for `json-file` logging driver.
 
@@ -244,9 +244,10 @@ internals) to create writable containers from images.  Many of these
 backends use operating system level technologies and can be
 configured.
 
-Specify options to the storage backend with **--storage-opt** flags. The only
-backend that currently takes options is *devicemapper*. Therefore use these
-flags with **-s=**devicemapper.
+Specify options to the storage backend with **--storage-opt** flags. The
+backends that currently take options are *devicemapper* and *zfs*.
+Options for *devicemapper* are prefixed with *dm* and options for *zfs*
+start with *zfs*.
 
 Specifically for devicemapper, the default is a "loopback" model which
 requires no pre-configuration, but is extremely inefficient.  Do not
@@ -258,7 +259,7 @@ more information see `man lvmthin`.  Then, use `--storage-opt
 dm.thinpooldev` to tell the Docker engine to use that pool for
 allocating images and container snapshots.
 
-Here is the list of *devicemapper* options:
+## Devicemapper options
 
 #### dm.thinpooldev
 
@@ -464,6 +465,40 @@ this topic, see
 Otherwise, set this flag for migrating existing Docker daemons to a
 daemon with a supported environment.
 
+## ZFS options
+
+#### zfs.fsname
+
+Set zfs filesystem under which docker will create its own datasets.
+By default docker will pick up the zfs filesystem where docker graph
+(`/var/lib/docker`) is located.
+
+Example use: `docker daemon -s zfs --storage-opt zfs.fsname=zroot/docker`
+
+#### dm.min_free_space
+
+Specifies the min free space percent in thin pool require for new device
+creation to succeed. This check applies to both free data space as well
+as free metadata space. Valid values are from 0% - 99%. Value 0% disables
+free space checking logic. If user does not specify a value for this optoin,
+then default value for this option is 10%.
+
+Whenever a new thin pool device is created (during docker pull or
+during container creation), docker will check minimum free space is
+available as specified by this parameter. If that is not the case, then
+device creation will fail and docker operation will fail.
+
+One will have to create more free space in thin pool to recover from the
+error. Either delete some of the images and containers from thin pool and
+create free space or add more storage to thin pool.
+
+For lvm thin pool, one can add more storage to volume group container thin
+pool and that should automatically resolve it. If loop devices are being
+used, then stop docker, grow the size of loop files and restart docker and
+that should resolve the issue.
+
+Example use: `docker daemon --storage-opt dm.min_free_space_percent=10%`
+
 # CLUSTER STORE OPTIONS
 
 The daemon uses libkv to advertise
@@ -510,7 +545,7 @@ multiple plugins installed, at least one must allow the request for it to
 complete.
 
 For information about how to create an authorization plugin, see [authorization
-plugin](https://docs.docker.com/engine/extend/authorization.md) section in the
+plugin](https://docs.docker.com/engine/extend/authorization/) section in the
 Docker extend section of this documentation.
 
 

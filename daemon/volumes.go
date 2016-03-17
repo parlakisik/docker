@@ -2,13 +2,13 @@ package daemon
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/docker/docker/container"
 	"github.com/docker/docker/daemon/execdriver"
-	derr "github.com/docker/docker/errors"
 	"github.com/docker/docker/volume"
 	"github.com/docker/engine-api/types"
 	containertypes "github.com/docker/engine-api/types/container"
@@ -114,7 +114,7 @@ func (daemon *Daemon) registerMountPoints(container *container.Container, hostCo
 		}
 
 		if binds[bind.Destination] {
-			return derr.ErrorCodeMountDup.WithArgs(bind.Destination)
+			return fmt.Errorf("Duplicate mount point '%s'", bind.Destination)
 		}
 
 		if len(bind.Name) > 0 {
@@ -128,7 +128,9 @@ func (daemon *Daemon) registerMountPoints(container *container.Container, hostCo
 			// bind.Name is an already existing volume, we need to use that here
 			bind.Driver = v.DriverName()
 			bind.Named = true
-			bind = setBindModeIfNull(bind)
+			if bind.Driver == "local" {
+				bind = setBindModeIfNull(bind)
+			}
 		}
 		if label.RelabelNeeded(bind.Mode) {
 			if err := label.Relabel(bind.Source, container.MountLabel, label.IsShared(bind.Mode)); err != nil {

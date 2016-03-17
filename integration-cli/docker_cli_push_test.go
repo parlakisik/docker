@@ -4,6 +4,8 @@ import (
 	"archive/tar"
 	"fmt"
 	"io/ioutil"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -148,6 +150,61 @@ func (s *DockerSchema1RegistrySuite) TestPushEmptyLayer(c *check.C) {
 	testPushEmptyLayer(c)
 }
 
+// testConcurrentPush pushes multiple tags to the same repo
+// concurrently.
+func testConcurrentPush(c *check.C) {
+	repoName := fmt.Sprintf("%v/dockercli/busybox", privateRegistryURL)
+
+	repos := []string{}
+	for _, tag := range []string{"push1", "push2", "push3"} {
+		repo := fmt.Sprintf("%v:%v", repoName, tag)
+		_, err := buildImage(repo, fmt.Sprintf(`
+	FROM busybox
+	ENTRYPOINT ["/bin/echo"]
+	ENV FOO foo
+	ENV BAR bar
+	CMD echo %s
+`, repo), true)
+		c.Assert(err, checker.IsNil)
+		repos = append(repos, repo)
+	}
+
+	// Push tags, in parallel
+	results := make(chan error)
+
+	for _, repo := range repos {
+		go func(repo string) {
+			_, _, err := runCommandWithOutput(exec.Command(dockerBinary, "push", repo))
+			results <- err
+		}(repo)
+	}
+
+	for range repos {
+		err := <-results
+		c.Assert(err, checker.IsNil, check.Commentf("concurrent push failed with error: %v", err))
+	}
+
+	// Clear local images store.
+	args := append([]string{"rmi"}, repos...)
+	dockerCmd(c, args...)
+
+	// Re-pull and run individual tags, to make sure pushes succeeded
+	for _, repo := range repos {
+		dockerCmd(c, "pull", repo)
+		dockerCmd(c, "inspect", repo)
+		out, _ := dockerCmd(c, "run", "--rm", repo)
+		c.Assert(strings.TrimSpace(out), checker.Equals, "/bin/sh -c echo "+repo)
+	}
+}
+
+func (s *DockerRegistrySuite) TestConcurrentPush(c *check.C) {
+	testConcurrentPush(c)
+}
+
+func (s *DockerSchema1RegistrySuite) TestConcurrentPush(c *check.C) {
+	testConcurrentPush(c)
+}
+
 func (s *DockerRegistrySuite) TestCrossRepositoryLayerPush(c *check.C) {
 	sourceRepoName := fmt.Sprintf("%v/dockercli/busybox", privateRegistryURL)
 	// tag the image to upload it to the private registry
@@ -201,7 +258,7 @@ func (s *DockerSchema1RegistrySuite) TestCrossRepositoryLayerPushNotSupported(c 
 	out2, _, err := dockerCmdWithError("push", destRepoName)
 	c.Assert(err, check.IsNil, check.Commentf("pushing the image to the private registry has failed: %s", out2))
 	// schema1 registry should not support cross-repo layer mounts, so ensure that this does not happen
-	c.Assert(strings.Contains(out2, "Mounted from dockercli/busybox"), check.Equals, false)
+	c.Assert(strings.Contains(out2, "Mounted from"), check.Equals, false)
 
 	digest2 := digest.DigestRegexp.FindString(out2)
 	c.Assert(len(digest2), checker.GreaterThan, 0, check.Commentf("no digest found for pushed manifest"))
@@ -231,6 +288,12 @@ func (s *DockerTrustSuite) TestTrustedPush(c *check.C) {
 	out, _, err = runCommandWithOutput(pullCmd)
 	c.Assert(err, check.IsNil, check.Commentf(out))
 	c.Assert(string(out), checker.Contains, "Status: Downloaded", check.Commentf(out))
+
+	// Assert that we rotated the snapshot key to the server by checking our local keystore
+	contents, err := ioutil.ReadDir(filepath.Join(cliconfig.ConfigDir(), "trust/private/tuf_keys", privateRegistryURL, "dockerclitrusted/pushtest"))
+	c.Assert(err, check.IsNil, check.Commentf("Unable to read local tuf key files"))
+	// Check that we only have 1 key (targets key)
+	c.Assert(contents, checker.HasLen, 1)
 }
 
 func (s *DockerTrustSuite) TestTrustedPushWithEnvPasswords(c *check.C) {
@@ -435,6 +498,7 @@ func (s *DockerTrustSuite) TestTrustedPushWithExpiredTimestamp(c *check.C) {
 }
 
 func (s *DockerTrustSuite) TestTrustedPushWithReleasesDelegation(c *check.C) {
+	testRequires(c, NotaryHosting)
 	repoName := fmt.Sprintf("%v/dockerclireleasedelegation/trusted", privateRegistryURL)
 	targetName := fmt.Sprintf("%s:latest", repoName)
 	pwd := "12345678"
@@ -464,4 +528,53 @@ func (s *DockerTrustSuite) TestTrustedPushWithReleasesDelegation(c *check.C) {
 	contents, err = ioutil.ReadFile(filepath.Join(cliconfig.ConfigDir(), "trust/tuf", repoName, "metadata/targets/releases.json"))
 	c.Assert(err, check.IsNil, check.Commentf("Unable to read targets/releases metadata"))
 	c.Assert(string(contents), checker.Contains, `"latest"`, check.Commentf(string(contents)))
+}
+
+func (s *DockerRegistryAuthHtpasswdSuite) TestPushNoCredentialsNoRetry(c *check.C) {
+	repoName := fmt.Sprintf("%s/busybox", privateRegistryURL)
+	dockerCmd(c, "tag", "busybox", repoName)
+	out, _, err := dockerCmdWithError("push", repoName)
+	c.Assert(err, check.NotNil, check.Commentf(out))
+	c.Assert(out, check.Not(checker.Contains), "Retrying")
+	c.Assert(out, checker.Contains, "no basic auth credentials")
+}
+
+// This may be flaky but it's needed not to regress on unauthorized push, see #21054
+func (s *DockerSuite) TestPushToCentralRegistryUnauthorized(c *check.C) {
+	testRequires(c, Network)
+	repoName := "test/busybox"
+	dockerCmd(c, "tag", "busybox", repoName)
+	out, _, err := dockerCmdWithError("push", repoName)
+	c.Assert(err, check.NotNil, check.Commentf(out))
+	c.Assert(out, checker.Contains, "unauthorized: access to the requested resource is not authorized")
+}
+
+func (s *DockerRegistryAuthTokenSuite) TestPushTokenServiceUnauthResponse(c *check.C) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"errors": [{"Code":"UNAUTHORIZED", "message": "a message", "detail": null}]}`))
+	}))
+	defer ts.Close()
+	s.setupRegistryWithTokenService(c, ts.URL)
+	repoName := fmt.Sprintf("%s/busybox", privateRegistryURL)
+	dockerCmd(c, "tag", "busybox", repoName)
+	out, _, err := dockerCmdWithError("push", repoName)
+	c.Assert(err, check.NotNil, check.Commentf(out))
+	c.Assert(out, checker.Contains, "unauthorized: a message")
+}
+
+func (s *DockerRegistryAuthTokenSuite) TestPushMisconfiguredTokenServiceResponse(c *check.C) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Header().Set("Content-Type", "application/json")
+		// this will make the daemon panics if no check is performed in retryOnError
+		w.Write([]byte(`{"error": "unauthorized"}`))
+	}))
+	defer ts.Close()
+	s.setupRegistryWithTokenService(c, ts.URL)
+	repoName := fmt.Sprintf("%s/busybox", privateRegistryURL)
+	dockerCmd(c, "tag", "busybox", repoName)
+	out, _, err := dockerCmdWithError("push", repoName)
+	c.Assert(err, check.NotNil, check.Commentf(out))
 }

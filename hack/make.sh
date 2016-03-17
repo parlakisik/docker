@@ -118,8 +118,10 @@ fi
 
 if [ -z "$DOCKER_CLIENTONLY" ]; then
 	DOCKER_BUILDTAGS+=" daemon"
-	if pkg-config libsystemd-journal 2> /dev/null ; then
+	if pkg-config 'libsystemd >= 209' 2> /dev/null ; then
 		DOCKER_BUILDTAGS+=" journald"
+	elif pkg-config 'libsystemd-journal' 2> /dev/null ; then
+		DOCKER_BUILDTAGS+=" journald journald_compat"
 	fi
 fi
 
@@ -135,7 +137,7 @@ fi
 # functionality.
 if \
 	command -v gcc &> /dev/null \
-	&& ! ( echo -e  '#include <libdevmapper.h>\nint main() { dm_task_deferred_remove(NULL); }'| gcc -ldevmapper -xc - -o /dev/null &> /dev/null ) \
+	&& ! ( echo -e  '#include <libdevmapper.h>\nint main() { dm_task_deferred_remove(NULL); }'| gcc -xc - -o /dev/null -ldevmapper &> /dev/null ) \
 ; then
        DOCKER_BUILDTAGS+=' libdm_no_deferred_remove'
 fi
@@ -167,12 +169,12 @@ BUILDFLAGS=( $BUILDFLAGS "${ORIG_BUILDFLAGS[@]}" )
 # Test timeout.
 
 if [ "${DOCKER_ENGINE_GOARCH}" == "arm" ]; then
-	: ${TIMEOUT:=210m}
+	: ${TIMEOUT:=10m}
+elif [ "${DOCKER_ENGINE_GOARCH}" == "windows" ]; then
+	: ${TIMEOUT:=8m}
 else
-	: ${TIMEOUT:=120m}
+	: ${TIMEOUT:=5m}
 fi
-
-TESTFLAGS+=" -test.timeout=${TIMEOUT}"
 
 LDFLAGS_STATIC_DOCKER="
 	$LDFLAGS_STATIC
@@ -237,6 +239,8 @@ test_env() {
 	# use "env -i" to tightly control the environment variables that bleed into the tests
 	env -i \
 		DEST="$DEST" \
+		DOCKER_TLS_VERIFY="$DOCKER_TEST_TLS_VERIFY" \
+		DOCKER_CERT_PATH="$DOCKER_TEST_CERT_PATH" \
 		DOCKER_ENGINE_GOARCH="$DOCKER_ENGINE_GOARCH" \
 		DOCKER_GRAPHDRIVER="$DOCKER_GRAPHDRIVER" \
 		DOCKER_USERLANDPROXY="$DOCKER_USERLANDPROXY" \
@@ -244,6 +248,7 @@ test_env() {
 		DOCKER_REMAP_ROOT="$DOCKER_REMAP_ROOT" \
 		DOCKER_REMOTE_DAEMON="$DOCKER_REMOTE_DAEMON" \
 		GOPATH="$GOPATH" \
+		GOTRACEBACK=all \
 		HOME="$ABS_DEST/fake-HOME" \
 		PATH="$PATH" \
 		TEMP="$TEMP" \

@@ -8,9 +8,9 @@ import (
 	"os"
 	"path"
 	"strings"
-	"text/template"
 
 	"github.com/docker/docker/pkg/aaparser"
+	"github.com/docker/docker/utils/templates"
 )
 
 var (
@@ -36,7 +36,7 @@ type profileData struct {
 
 // generateDefault creates an apparmor profile from ProfileData.
 func (p *profileData) generateDefault(out io.Writer) error {
-	compiled, err := template.New("apparmor_profile").Parse(baseTemplate)
+	compiled, err := templates.NewParse("apparmor_profile", baseTemplate)
 	if err != nil {
 		return err
 	}
@@ -89,7 +89,7 @@ func InstallDefault(name string) error {
 	return nil
 }
 
-// IsLoaded checks if a passed profile as been loaded into the kernel.
+// IsLoaded checks if a passed profile has been loaded into the kernel.
 func IsLoaded(name string) error {
 	file, err := os.Open("/sys/kernel/security/apparmor/profiles")
 	if err != nil {

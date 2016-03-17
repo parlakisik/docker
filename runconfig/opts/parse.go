@@ -59,6 +59,7 @@ func Parse(cmd *flag.FlagSet, args []string) (*container.Config, *container.Host
 		flPrivileged        = cmd.Bool([]string{"-privileged"}, false, "Give extended privileges to this container")
 		flPidMode           = cmd.String([]string{"-pid"}, "", "PID namespace to use")
 		flUTSMode           = cmd.String([]string{"-uts"}, "", "UTS namespace to use")
+		flUsernsMode        = cmd.String([]string{"-userns"}, "", "User namespace to use")
 		flPublishAll        = cmd.Bool([]string{"P", "-publish-all"}, false, "Publish all exposed ports to random ports")
 		flStdin             = cmd.Bool([]string{"i", "-interactive"}, false, "Keep STDIN open even if not attached")
 		flTty               = cmd.Bool([]string{"t", "-tty"}, false, "Allocate a pseudo-TTY")
@@ -85,6 +86,7 @@ func Parse(cmd *flag.FlagSet, args []string) (*container.Config, *container.Host
 		flIPv4Address       = cmd.String([]string{"-ip"}, "", "Container IPv4 address (e.g. 172.30.100.104)")
 		flIPv6Address       = cmd.String([]string{"-ip6"}, "", "Container IPv6 address (e.g. 2001:db8::33)")
 		flIpcMode           = cmd.String([]string{"-ipc"}, "", "IPC namespace to use")
+		flPidsLimit         = cmd.Int64([]string{"-pids-limit"}, 0, "Tune container pids limit (set -1 for unlimited)")
 		flRestartPolicy     = cmd.String([]string{"-restart"}, "no", "Restart policy to apply when a container exits")
 		flReadonlyRootfs    = cmd.Bool([]string{"-read-only"}, false, "Mount the container's root filesystem as read only")
 		flLoggingDriver     = cmd.String([]string{"-log-driver"}, "", "Logging driver for container")
@@ -228,15 +230,15 @@ func Parse(cmd *flag.FlagSet, args []string) (*container.Config, *container.Host
 
 	var (
 		parsedArgs = cmd.Args()
-		runCmd     *strslice.StrSlice
-		entrypoint *strslice.StrSlice
+		runCmd     strslice.StrSlice
+		entrypoint strslice.StrSlice
 		image      = cmd.Arg(0)
 	)
 	if len(parsedArgs) > 1 {
-		runCmd = strslice.New(parsedArgs[1:]...)
+		runCmd = strslice.StrSlice(parsedArgs[1:])
 	}
 	if *flEntrypoint != "" {
-		entrypoint = strslice.New(*flEntrypoint)
+		entrypoint = strslice.StrSlice{*flEntrypoint}
 	}
 
 	var (
@@ -315,6 +317,11 @@ func Parse(cmd *flag.FlagSet, args []string) (*container.Config, *container.Host
 		return nil, nil, nil, cmd, fmt.Errorf("--uts: invalid UTS mode")
 	}
 
+	usernsMode := container.UsernsMode(*flUsernsMode)
+	if !usernsMode.Valid() {
+		return nil, nil, nil, cmd, fmt.Errorf("--userns: invalid USER mode")
+	}
+
 	restartPolicy, err := ParseRestartPolicy(*flRestartPolicy)
 	if err != nil {
 		return nil, nil, nil, cmd, err
@@ -343,6 +350,7 @@ func Parse(cmd *flag.FlagSet, args []string) (*container.Config, *container.Host
 		CpusetCpus:           *flCpusetCpus,
 		CpusetMems:           *flCpusetMems,
 		CPUQuota:             *flCPUQuota,
+		PidsLimit:            *flPidsLimit,
 		BlkioWeight:          *flBlkioWeight,
 		BlkioWeightDevice:    flBlkioWeightDevice.GetList(),
 		BlkioDeviceReadBps:   flDeviceReadBps.GetList(),
@@ -402,8 +410,9 @@ func Parse(cmd *flag.FlagSet, args []string) (*container.Config, *container.Host
 		IpcMode:        ipcMode,
 		PidMode:        pidMode,
 		UTSMode:        utsMode,
-		CapAdd:         strslice.New(flCapAdd.GetAll()...),
-		CapDrop:        strslice.New(flCapDrop.GetAll()...),
+		UsernsMode:     usernsMode,
+		CapAdd:         strslice.StrSlice(flCapAdd.GetAll()),
+		CapDrop:        strslice.StrSlice(flCapDrop.GetAll()),
 		GroupAdd:       flGroupAdd.GetAll(),
 		RestartPolicy:  restartPolicy,
 		SecurityOpt:    securityOpts,
@@ -500,8 +509,8 @@ func parseLoggingOpts(loggingDriver string, loggingOpts []string) (map[string]st
 func parseSecurityOpts(securityOpts []string) ([]string, error) {
 	for key, opt := range securityOpts {
 		con := strings.SplitN(opt, ":", 2)
-		if len(con) == 1 {
-			return securityOpts, fmt.Errorf("invalid --security-opt: %q", opt)
+		if len(con) == 1 && con[0] != "no-new-privileges" {
+			return securityOpts, fmt.Errorf("Invalid --security-opt: %q", opt)
 		}
 		if con[0] == "seccomp" && con[1] != "unconfined" {
 			f, err := ioutil.ReadFile(con[1])

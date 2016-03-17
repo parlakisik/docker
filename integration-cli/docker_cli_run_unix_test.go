@@ -817,7 +817,7 @@ func (s *DockerSuite) TestRunSeccompProfileDenyCloneUserns(c *check.C) {
 // TestRunSeccompUnconfinedCloneUserns checks that
 // 'docker run --security-opt seccomp:unconfined syscall-test' allows creating a userns.
 func (s *DockerSuite) TestRunSeccompUnconfinedCloneUserns(c *check.C) {
-	testRequires(c, SameHostDaemon, seccompEnabled, NotUserNamespace)
+	testRequires(c, SameHostDaemon, seccompEnabled, UserNamespaceInKernel, NotUserNamespace)
 
 	// make sure running w privileged is ok
 	runCmd := exec.Command(dockerBinary, "run", "--security-opt", "seccomp:unconfined", "syscall-test", "userns-test", "id")
@@ -829,7 +829,7 @@ func (s *DockerSuite) TestRunSeccompUnconfinedCloneUserns(c *check.C) {
 // TestRunSeccompAllowPrivCloneUserns checks that 'docker run --privileged syscall-test'
 // allows creating a userns.
 func (s *DockerSuite) TestRunSeccompAllowPrivCloneUserns(c *check.C) {
-	testRequires(c, SameHostDaemon, seccompEnabled, NotUserNamespace)
+	testRequires(c, SameHostDaemon, seccompEnabled, UserNamespaceInKernel, NotUserNamespace)
 
 	// make sure running w privileged is ok
 	runCmd := exec.Command(dockerBinary, "run", "--privileged", "syscall-test", "userns-test", "id")
@@ -895,17 +895,88 @@ func (s *DockerSuite) TestRunSeccompDefaultProfile(c *check.C) {
 	}
 }
 
+// TestRunNoNewPrivSetuid checks that --security-opt=no-new-privileges prevents
+// effective uid transtions on executing setuid binaries.
+func (s *DockerSuite) TestRunNoNewPrivSetuid(c *check.C) {
+	testRequires(c, DaemonIsLinux, NotUserNamespace, SameHostDaemon)
+
+	// test that running a setuid binary results in no effective uid transition
+	runCmd := exec.Command(dockerBinary, "run", "--security-opt", "no-new-privileges", "--user", "1000", "nnp-test", "/usr/bin/nnp-test")
+	if out, _, err := runCommandWithOutput(runCmd); err != nil || !strings.Contains(out, "EUID=1000") {
+		c.Fatalf("expected output to contain EUID=1000, got %s: %v", out, err)
+	}
+}
+
 func (s *DockerSuite) TestRunApparmorProcDirectory(c *check.C) {
 	testRequires(c, SameHostDaemon, Apparmor)
 
 	// running w seccomp unconfined tests the apparmor profile
-	runCmd := exec.Command(dockerBinary, "run", "--security-opt", "seccomp:unconfined", "debian:jessie", "chmod", "777", "/proc/1/cgroup")
+	runCmd := exec.Command(dockerBinary, "run", "--security-opt", "seccomp:unconfined", "busybox", "chmod", "777", "/proc/1/cgroup")
 	if out, _, err := runCommandWithOutput(runCmd); err == nil || !(strings.Contains(out, "Permission denied") || strings.Contains(out, "Operation not permitted")) {
 		c.Fatalf("expected chmod 777 /proc/1/cgroup to fail, got %s: %v", out, err)
 	}
 
-	runCmd = exec.Command(dockerBinary, "run", "--security-opt", "seccomp:unconfined", "debian:jessie", "chmod", "777", "/proc/1/attr/current")
+	runCmd = exec.Command(dockerBinary, "run", "--security-opt", "seccomp:unconfined", "busybox", "chmod", "777", "/proc/1/attr/current")
 	if out, _, err := runCommandWithOutput(runCmd); err == nil || !(strings.Contains(out, "Permission denied") || strings.Contains(out, "Operation not permitted")) {
 		c.Fatalf("expected chmod 777 /proc/1/attr/current to fail, got %s: %v", out, err)
 	}
+}
+
+// make sure the default profile can be successfully parsed (using unshare as it is
+// something which we know is blocked in the default profile)
+func (s *DockerSuite) TestRunSeccompWithDefaultProfile(c *check.C) {
+	testRequires(c, SameHostDaemon, seccompEnabled)
+
+	out, _, err := dockerCmdWithError("run", "--security-opt", "seccomp:../profiles/seccomp/default.json", "debian:jessie", "unshare", "--map-root-user", "--user", "sh", "-c", "whoami")
+	c.Assert(err, checker.NotNil, check.Commentf(out))
+	c.Assert(strings.TrimSpace(out), checker.Equals, "unshare: unshare failed: Operation not permitted")
+}
+
+// TestRunDeviceSymlink checks run with device that follows symlink (#13840)
+func (s *DockerSuite) TestRunDeviceSymlink(c *check.C) {
+	testRequires(c, DaemonIsLinux, NotUserNamespace, NotArm, SameHostDaemon)
+	if _, err := os.Stat("/dev/zero"); err != nil {
+		c.Skip("Host does not have /dev/zero")
+	}
+
+	// Create a temporary directory to create symlink
+	tmpDir, err := ioutil.TempDir("", "docker_device_follow_symlink_tests")
+	c.Assert(err, checker.IsNil)
+
+	defer os.RemoveAll(tmpDir)
+
+	// Create a symbolic link to /dev/zero
+	symZero := filepath.Join(tmpDir, "zero")
+	err = os.Symlink("/dev/zero", symZero)
+	c.Assert(err, checker.IsNil)
+
+	// Create a temporary file "temp" inside tmpDir, write some data to "tmpDir/temp",
+	// then create a symlink "tmpDir/file" to the temporary file "tmpDir/temp".
+	tmpFile := filepath.Join(tmpDir, "temp")
+	err = ioutil.WriteFile(tmpFile, []byte("temp"), 0666)
+	c.Assert(err, checker.IsNil)
+	symFile := filepath.Join(tmpDir, "file")
+	err = os.Symlink(tmpFile, symFile)
+	c.Assert(err, checker.IsNil)
+
+	// md5sum of 'dd if=/dev/zero bs=4K count=8' is bb7df04e1b0a2570657527a7e108ae23
+	out, _ := dockerCmd(c, "run", "--device", symZero+":/dev/symzero", "busybox", "sh", "-c", "dd if=/dev/symzero bs=4K count=8 | md5sum")
+	c.Assert(strings.Trim(out, "\r\n"), checker.Contains, "bb7df04e1b0a2570657527a7e108ae23", check.Commentf("expected output bb7df04e1b0a2570657527a7e108ae23"))
+
+	// symlink "tmpDir/file" to a file "tmpDir/temp" will result in an error as it is not a device.
+	out, _, err = dockerCmdWithError("run", "--device", symFile+":/dev/symzero", "busybox", "sh", "-c", "dd if=/dev/symzero bs=4K count=8 | md5sum")
+	c.Assert(err, check.NotNil)
+	c.Assert(strings.Trim(out, "\r\n"), checker.Contains, "not a device node", check.Commentf("expected output 'not a device node'"))
+}
+
+// TestRunPidsLimit makes sure the pids cgroup is set with --pids-limit
+func (s *DockerSuite) TestRunPidsLimit(c *check.C) {
+	testRequires(c, pidsLimit)
+
+	file := "/sys/fs/cgroup/pids/pids.max"
+	out, _ := dockerCmd(c, "run", "--name", "skittles", "--pids-limit", "2", "busybox", "cat", file)
+	c.Assert(strings.TrimSpace(out), checker.Equals, "2")
+
+	out = inspectField(c, "skittles", "HostConfig.PidsLimit")
+	c.Assert(out, checker.Equals, "2", check.Commentf("setting the pids limit failed"))
 }

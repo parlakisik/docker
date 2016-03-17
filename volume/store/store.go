@@ -54,7 +54,7 @@ type VolumeStore struct {
 }
 
 // List proxies to all registered volume drivers to get the full list of volumes
-// If a driver returns a volume that has name which conflicts with a another volume from a different driver,
+// If a driver returns a volume that has name which conflicts with another volume from a different driver,
 // the first volume is chosen and the conflicting volume is dropped.
 func (s *VolumeStore) List() ([]volume.Volume, []string, error) {
 	vols, warnings, err := s.list()
@@ -194,11 +194,13 @@ func (s *VolumeStore) create(name, driverName string, opts map[string]string) (v
 		}
 	}
 
-	logrus.Debugf("Registering new volume reference: driver %q, name %q", driverName, name)
 	vd, err := volumedrivers.GetDriver(driverName)
+
 	if err != nil {
 		return nil, &OpErr{Op: "create", Name: name, Err: err}
 	}
+
+	logrus.Debugf("Registering new volume reference: driver %q, name %q", vd.Name(), name)
 
 	if v, _ := vd.Get(name); v != nil {
 		return v, nil
@@ -242,7 +244,7 @@ func (s *VolumeStore) Get(name string) (volume.Volume, error) {
 	return v, nil
 }
 
-// get requests the volume, if the driver info is stored it just access that driver,
+// getVolume requests the volume, if the driver info is stored it just accesses that driver,
 // if the driver is unknown it probes all drivers until it finds the first volume with that name.
 // it is expected that callers of this function hold any necessary locks
 func (s *VolumeStore) getVolume(name string) (volume.Volume, error) {

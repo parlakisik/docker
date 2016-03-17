@@ -147,7 +147,14 @@ func (n *networkRouter) postNetworkDisconnect(ctx context.Context, w http.Respon
 }
 
 func (n *networkRouter) deleteNetwork(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
-	return n.backend.DeleteNetwork(vars["id"])
+	if err := httputils.ParseForm(r); err != nil {
+		return err
+	}
+	if err := n.backend.DeleteNetwork(vars["id"]); err != nil {
+		return err
+	}
+	w.WriteHeader(http.StatusNoContent)
+	return nil
 }
 
 func buildNetworkResource(nw libnetwork.Network) *types.NetworkResource {
@@ -174,11 +181,12 @@ func buildNetworkResource(nw libnetwork.Network) *types.NetworkResource {
 			continue
 		}
 		sb := ei.Sandbox()
-		if sb == nil {
-			continue
+		key := "ep-" + e.ID()
+		if sb != nil {
+			key = sb.ContainerID()
 		}
 
-		r.Containers[sb.ContainerID()] = buildEndpointResource(e)
+		r.Containers[key] = buildEndpointResource(e)
 	}
 	return r
 }
