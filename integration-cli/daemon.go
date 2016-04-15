@@ -142,7 +142,9 @@ func (d *Daemon) StartWithLogFile(out *os.File, providedArgs ...string) error {
 
 	args := append(d.GlobalFlags,
 		d.Command,
+		"--containerd", "/var/run/docker/libcontainerd/docker-containerd.sock",
 		"--graph", d.root,
+		"--exec-root", filepath.Join(d.folder, "exec-root"),
 		"--pidfile", fmt.Sprintf("%s/docker.pid", d.folder),
 		fmt.Sprintf("--userland-proxy=%t", d.userlandProxy),
 	)
@@ -232,6 +234,8 @@ func (d *Daemon) StartWithLogFile(out *os.File, providedArgs ...string) error {
 				return fmt.Errorf("[%s] error querying daemon for root directory: %v", d.id, err)
 			}
 			return nil
+		case <-d.wait:
+			return fmt.Errorf("[%s] Daemon exited during startup", d.id)
 		}
 	}
 }
@@ -243,6 +247,29 @@ func (d *Daemon) StartWithBusybox(arg ...string) error {
 		return err
 	}
 	return d.LoadBusybox()
+}
+
+// Kill will send a SIGKILL to the daemon
+func (d *Daemon) Kill() error {
+	if d.cmd == nil || d.wait == nil {
+		return errors.New("daemon not started")
+	}
+
+	defer func() {
+		d.logFile.Close()
+		d.cmd = nil
+	}()
+
+	if err := d.cmd.Process.Kill(); err != nil {
+		d.c.Logf("Could not kill daemon: %v", err)
+		return err
+	}
+
+	if err := os.Remove(fmt.Sprintf("%s/docker.pid", d.folder)); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // Stop will send a SIGINT every second and wait for the daemon to stop.
@@ -297,6 +324,10 @@ out2:
 
 	if err := d.cmd.Process.Kill(); err != nil {
 		d.c.Logf("Could not kill daemon: %v", err)
+		return err
+	}
+
+	if err := os.Remove(fmt.Sprintf("%s/docker.pid", d.folder)); err != nil {
 		return err
 	}
 

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/docker/container"
@@ -25,6 +26,7 @@ import (
 	"github.com/docker/docker/reference"
 	"github.com/docker/docker/runconfig"
 	runconfigopts "github.com/docker/docker/runconfig/opts"
+	"github.com/docker/engine-api/types"
 	pblkiodev "github.com/docker/engine-api/types/blkiodev"
 	containertypes "github.com/docker/engine-api/types/container"
 	"github.com/docker/libnetwork"
@@ -33,10 +35,10 @@ import (
 	"github.com/docker/libnetwork/ipamutils"
 	"github.com/docker/libnetwork/netlabel"
 	"github.com/docker/libnetwork/options"
-	"github.com/docker/libnetwork/types"
-	blkiodev "github.com/opencontainers/runc/libcontainer/configs"
+	lntypes "github.com/docker/libnetwork/types"
 	"github.com/opencontainers/runc/libcontainer/label"
 	"github.com/opencontainers/runc/libcontainer/user"
+	"github.com/opencontainers/specs/specs-go"
 )
 
 const (
@@ -49,18 +51,87 @@ const (
 	// constants for remapped root settings
 	defaultIDSpecifier string = "default"
 	defaultRemappedID  string = "dockremap"
+
+	// constant for cgroup drivers
+	cgroupFsDriver      = "cgroupfs"
+	cgroupSystemdDriver = "systemd"
 )
 
-func getBlkioWeightDevices(config *containertypes.HostConfig) ([]*blkiodev.WeightDevice, error) {
+func getMemoryResources(config containertypes.Resources) *specs.Memory {
+	memory := specs.Memory{}
+
+	if config.Memory > 0 {
+		limit := uint64(config.Memory)
+		memory.Limit = &limit
+	}
+
+	if config.MemoryReservation > 0 {
+		reservation := uint64(config.MemoryReservation)
+		memory.Reservation = &reservation
+	}
+
+	if config.MemorySwap != 0 {
+		swap := uint64(config.MemorySwap)
+		memory.Swap = &swap
+	}
+
+	if config.MemorySwappiness != nil {
+		swappiness := uint64(*config.MemorySwappiness)
+		memory.Swappiness = &swappiness
+	}
+
+	if config.KernelMemory != 0 {
+		kernelMemory := uint64(config.KernelMemory)
+		memory.Kernel = &kernelMemory
+	}
+
+	return &memory
+}
+
+func getCPUResources(config containertypes.Resources) *specs.CPU {
+	cpu := specs.CPU{}
+
+	if config.CPUShares != 0 {
+		shares := uint64(config.CPUShares)
+		cpu.Shares = &shares
+	}
+
+	if config.CpusetCpus != "" {
+		cpuset := config.CpusetCpus
+		cpu.Cpus = &cpuset
+	}
+
+	if config.CpusetMems != "" {
+		cpuset := config.CpusetMems
+		cpu.Mems = &cpuset
+	}
+
+	if config.CPUPeriod != 0 {
+		period := uint64(config.CPUPeriod)
+		cpu.Period = &period
+	}
+
+	if config.CPUQuota != 0 {
+		quota := uint64(config.CPUQuota)
+		cpu.Quota = &quota
+	}
+
+	return &cpu
+}
+
+func getBlkioWeightDevices(config containertypes.Resources) ([]specs.WeightDevice, error) {
 	var stat syscall.Stat_t
-	var blkioWeightDevices []*blkiodev.WeightDevice
+	var blkioWeightDevices []specs.WeightDevice
 
 	for _, weightDevice := range config.BlkioWeightDevice {
 		if err := syscall.Stat(weightDevice.Path, &stat); err != nil {
 			return nil, err
 		}
-		weightDevice := blkiodev.NewWeightDevice(int64(stat.Rdev/256), int64(stat.Rdev%256), weightDevice.Weight, 0)
-		blkioWeightDevices = append(blkioWeightDevices, weightDevice)
+		weight := weightDevice.Weight
+		d := specs.WeightDevice{Weight: &weight}
+		d.Major = int64(stat.Rdev / 256)
+		d.Minor = int64(stat.Rdev % 256)
+		blkioWeightDevices = append(blkioWeightDevices, d)
 	}
 
 	return blkioWeightDevices, nil
@@ -73,15 +144,21 @@ func parseSecurityOpt(container *container.Container, config *containertypes.Hos
 	)
 
 	for _, opt := range config.SecurityOpt {
-		con := strings.SplitN(opt, ":", 2)
-		if len(con) == 1 {
-			switch con[0] {
-			case "no-new-privileges":
-				container.NoNewPrivileges = true
-			default:
+		if opt == "no-new-privileges" {
+			container.NoNewPrivileges = true
+		} else {
+			var con []string
+			if strings.Contains(opt, "=") {
+				con = strings.SplitN(opt, "=", 2)
+			} else if strings.Contains(opt, ":") {
+				con = strings.SplitN(opt, ":", 2)
+				logrus.Warnf("Security options with `:` as a separator are deprecated and will be completely unsupported in 1.13, use `=` instead.")
+			}
+
+			if len(con) != 2 {
 				return fmt.Errorf("Invalid --security-opt 1: %q", opt)
 			}
-		} else {
+
 			switch con[0] {
 			case "label":
 				labelOpts = append(labelOpts, con[1])
@@ -99,61 +176,73 @@ func parseSecurityOpt(container *container.Container, config *containertypes.Hos
 	return err
 }
 
-func getBlkioReadIOpsDevices(config *containertypes.HostConfig) ([]*blkiodev.ThrottleDevice, error) {
-	var blkioReadIOpsDevice []*blkiodev.ThrottleDevice
+func getBlkioReadIOpsDevices(config containertypes.Resources) ([]specs.ThrottleDevice, error) {
+	var blkioReadIOpsDevice []specs.ThrottleDevice
 	var stat syscall.Stat_t
 
 	for _, iopsDevice := range config.BlkioDeviceReadIOps {
 		if err := syscall.Stat(iopsDevice.Path, &stat); err != nil {
 			return nil, err
 		}
-		readIOpsDevice := blkiodev.NewThrottleDevice(int64(stat.Rdev/256), int64(stat.Rdev%256), iopsDevice.Rate)
-		blkioReadIOpsDevice = append(blkioReadIOpsDevice, readIOpsDevice)
+		rate := iopsDevice.Rate
+		d := specs.ThrottleDevice{Rate: &rate}
+		d.Major = int64(stat.Rdev / 256)
+		d.Minor = int64(stat.Rdev % 256)
+		blkioReadIOpsDevice = append(blkioReadIOpsDevice, d)
 	}
 
 	return blkioReadIOpsDevice, nil
 }
 
-func getBlkioWriteIOpsDevices(config *containertypes.HostConfig) ([]*blkiodev.ThrottleDevice, error) {
-	var blkioWriteIOpsDevice []*blkiodev.ThrottleDevice
+func getBlkioWriteIOpsDevices(config containertypes.Resources) ([]specs.ThrottleDevice, error) {
+	var blkioWriteIOpsDevice []specs.ThrottleDevice
 	var stat syscall.Stat_t
 
 	for _, iopsDevice := range config.BlkioDeviceWriteIOps {
 		if err := syscall.Stat(iopsDevice.Path, &stat); err != nil {
 			return nil, err
 		}
-		writeIOpsDevice := blkiodev.NewThrottleDevice(int64(stat.Rdev/256), int64(stat.Rdev%256), iopsDevice.Rate)
-		blkioWriteIOpsDevice = append(blkioWriteIOpsDevice, writeIOpsDevice)
+		rate := iopsDevice.Rate
+		d := specs.ThrottleDevice{Rate: &rate}
+		d.Major = int64(stat.Rdev / 256)
+		d.Minor = int64(stat.Rdev % 256)
+		blkioWriteIOpsDevice = append(blkioWriteIOpsDevice, d)
 	}
 
 	return blkioWriteIOpsDevice, nil
 }
 
-func getBlkioReadBpsDevices(config *containertypes.HostConfig) ([]*blkiodev.ThrottleDevice, error) {
-	var blkioReadBpsDevice []*blkiodev.ThrottleDevice
+func getBlkioReadBpsDevices(config containertypes.Resources) ([]specs.ThrottleDevice, error) {
+	var blkioReadBpsDevice []specs.ThrottleDevice
 	var stat syscall.Stat_t
 
 	for _, bpsDevice := range config.BlkioDeviceReadBps {
 		if err := syscall.Stat(bpsDevice.Path, &stat); err != nil {
 			return nil, err
 		}
-		readBpsDevice := blkiodev.NewThrottleDevice(int64(stat.Rdev/256), int64(stat.Rdev%256), bpsDevice.Rate)
-		blkioReadBpsDevice = append(blkioReadBpsDevice, readBpsDevice)
+		rate := bpsDevice.Rate
+		d := specs.ThrottleDevice{Rate: &rate}
+		d.Major = int64(stat.Rdev / 256)
+		d.Minor = int64(stat.Rdev % 256)
+		blkioReadBpsDevice = append(blkioReadBpsDevice, d)
 	}
 
 	return blkioReadBpsDevice, nil
 }
 
-func getBlkioWriteBpsDevices(config *containertypes.HostConfig) ([]*blkiodev.ThrottleDevice, error) {
-	var blkioWriteBpsDevice []*blkiodev.ThrottleDevice
+func getBlkioWriteBpsDevices(config containertypes.Resources) ([]specs.ThrottleDevice, error) {
+	var blkioWriteBpsDevice []specs.ThrottleDevice
 	var stat syscall.Stat_t
 
 	for _, bpsDevice := range config.BlkioDeviceWriteBps {
 		if err := syscall.Stat(bpsDevice.Path, &stat); err != nil {
 			return nil, err
 		}
-		writeBpsDevice := blkiodev.NewThrottleDevice(int64(stat.Rdev/256), int64(stat.Rdev%256), bpsDevice.Rate)
-		blkioWriteBpsDevice = append(blkioWriteBpsDevice, writeBpsDevice)
+		rate := bpsDevice.Rate
+		d := specs.ThrottleDevice{Rate: &rate}
+		d.Major = int64(stat.Rdev / 256)
+		d.Minor = int64(stat.Rdev % 256)
+		blkioWriteBpsDevice = append(blkioWriteBpsDevice, d)
 	}
 
 	return blkioWriteBpsDevice, nil
@@ -245,10 +334,10 @@ func verifyContainerResources(resources *containertypes.Resources, sysInfo *sysi
 		resources.MemorySwap = -1
 	}
 	if resources.Memory > 0 && resources.MemorySwap > 0 && resources.MemorySwap < resources.Memory {
-		return warnings, fmt.Errorf("Minimum memoryswap limit should be larger than memory limit, see usage.")
+		return warnings, fmt.Errorf("Minimum memoryswap limit should be larger than memory limit, see usage")
 	}
 	if resources.Memory == 0 && resources.MemorySwap > 0 && !update {
-		return warnings, fmt.Errorf("You should always set the Memory limit when using Memoryswap limit, see usage.")
+		return warnings, fmt.Errorf("You should always set the Memory limit when using Memoryswap limit, see usage")
 	}
 	if resources.MemorySwappiness != nil && *resources.MemorySwappiness != -1 && !sysInfo.MemorySwappiness {
 		warnings = append(warnings, "Your kernel does not support memory swappiness capabilities, memory swappiness discarded.")
@@ -258,7 +347,7 @@ func verifyContainerResources(resources *containertypes.Resources, sysInfo *sysi
 	if resources.MemorySwappiness != nil {
 		swappiness := *resources.MemorySwappiness
 		if swappiness < -1 || swappiness > 100 {
-			return warnings, fmt.Errorf("Invalid value: %v, valid memory swappiness range is 0-100.", swappiness)
+			return warnings, fmt.Errorf("Invalid value: %v, valid memory swappiness range is 0-100", swappiness)
 		}
 	}
 	if resources.MemoryReservation > 0 && !sysInfo.MemoryReservation {
@@ -266,8 +355,11 @@ func verifyContainerResources(resources *containertypes.Resources, sysInfo *sysi
 		logrus.Warnf("Your kernel does not support memory soft limit capabilities. Limitation discarded.")
 		resources.MemoryReservation = 0
 	}
+	if resources.MemoryReservation > 0 && resources.MemoryReservation < linuxMinMemory {
+		return warnings, fmt.Errorf("Minimum memory reservation allowed is 4MB")
+	}
 	if resources.Memory > 0 && resources.MemoryReservation > 0 && resources.Memory < resources.MemoryReservation {
-		return warnings, fmt.Errorf("Minimum memory limit should be larger than memory reservation limit, see usage.")
+		return warnings, fmt.Errorf("Minimum memory limit should be larger than memory reservation limit, see usage")
 	}
 	if resources.KernelMemory > 0 && !sysInfo.KernelMemory {
 		warnings = append(warnings, "Your kernel does not support kernel memory limit capabilities. Limitation discarded.")
@@ -308,10 +400,21 @@ func verifyContainerResources(resources *containertypes.Resources, sysInfo *sysi
 		logrus.Warnf("Your kernel does not support CPU cfs period. Period discarded.")
 		resources.CPUPeriod = 0
 	}
+	if resources.CPUPeriod > 0 && (resources.CPUPeriod < 1000 || resources.CPUQuota > 1000000) {
+		return warnings, fmt.Errorf("CPU cfs period can not be less than 1ms (i.e. 1000) or larger than 1s (i.e. 1000000)")
+	}
 	if resources.CPUQuota > 0 && !sysInfo.CPUCfsQuota {
 		warnings = append(warnings, "Your kernel does not support CPU cfs quota. Quota discarded.")
 		logrus.Warnf("Your kernel does not support CPU cfs quota. Quota discarded.")
 		resources.CPUQuota = 0
+	}
+	if resources.CPUQuota > 0 && resources.CPUQuota < 1000 {
+		return warnings, fmt.Errorf("CPU cfs quota can not be less than 1ms (i.e. 1000)")
+	}
+	if resources.CPUPercent > 0 {
+		warnings = append(warnings, "%s does not support CPU percent. Percent discarded.", runtime.GOOS)
+		logrus.Warnf("%s does not support CPU percent. Percent discarded.", runtime.GOOS)
+		resources.CPUPercent = 0
 	}
 
 	// cpuset subsystem checks and adjustments
@@ -323,17 +426,17 @@ func verifyContainerResources(resources *containertypes.Resources, sysInfo *sysi
 	}
 	cpusAvailable, err := sysInfo.IsCpusetCpusAvailable(resources.CpusetCpus)
 	if err != nil {
-		return warnings, fmt.Errorf("Invalid value %s for cpuset cpus.", resources.CpusetCpus)
+		return warnings, fmt.Errorf("Invalid value %s for cpuset cpus", resources.CpusetCpus)
 	}
 	if !cpusAvailable {
-		return warnings, fmt.Errorf("Requested CPUs are not available - requested %s, available: %s.", resources.CpusetCpus, sysInfo.Cpus)
+		return warnings, fmt.Errorf("Requested CPUs are not available - requested %s, available: %s", resources.CpusetCpus, sysInfo.Cpus)
 	}
 	memsAvailable, err := sysInfo.IsCpusetMemsAvailable(resources.CpusetMems)
 	if err != nil {
-		return warnings, fmt.Errorf("Invalid value %s for cpuset mems.", resources.CpusetMems)
+		return warnings, fmt.Errorf("Invalid value %s for cpuset mems", resources.CpusetMems)
 	}
 	if !memsAvailable {
-		return warnings, fmt.Errorf("Requested memory nodes are not available - requested %s, available: %s.", resources.CpusetMems, sysInfo.Mems)
+		return warnings, fmt.Errorf("Requested memory nodes are not available - requested %s, available: %s", resources.CpusetMems, sysInfo.Mems)
 	}
 
 	// blkio subsystem checks and adjustments
@@ -343,7 +446,7 @@ func verifyContainerResources(resources *containertypes.Resources, sysInfo *sysi
 		resources.BlkioWeight = 0
 	}
 	if resources.BlkioWeight > 0 && (resources.BlkioWeight < 10 || resources.BlkioWeight > 1000) {
-		return warnings, fmt.Errorf("Range of blkio weight is from 10 to 1000.")
+		return warnings, fmt.Errorf("Range of blkio weight is from 10 to 1000")
 	}
 	if len(resources.BlkioWeightDevice) > 0 && !sysInfo.BlkioWeightDevice {
 		warnings = append(warnings, "Your kernel does not support Block I/O weight_device.")
@@ -375,29 +478,38 @@ func verifyContainerResources(resources *containertypes.Resources, sysInfo *sysi
 }
 
 func (daemon *Daemon) getCgroupDriver() string {
-	cgroupDriver := "cgroupfs"
-	if daemon.usingSystemd() {
-		cgroupDriver = "systemd"
+	cgroupDriver := cgroupFsDriver
+
+	if UsingSystemd(daemon.configStore) {
+		cgroupDriver = cgroupSystemdDriver
 	}
 	return cgroupDriver
 }
 
-func usingSystemd(config *Config) bool {
+// getCD gets the raw value of the native.cgroupdriver option, if set.
+func getCD(config *Config) string {
 	for _, option := range config.ExecOptions {
 		key, val, err := parsers.ParseKeyValueOpt(option)
 		if err != nil || !strings.EqualFold(key, "native.cgroupdriver") {
 			continue
 		}
-		if val == "systemd" {
-			return true
-		}
+		return val
 	}
-
-	return false
+	return ""
 }
 
-func (daemon *Daemon) usingSystemd() bool {
-	return usingSystemd(daemon.configStore)
+// VerifyCgroupDriver validates native.cgroupdriver
+func VerifyCgroupDriver(config *Config) error {
+	cd := getCD(config)
+	if cd == "" || cd == cgroupFsDriver || cd == cgroupSystemdDriver {
+		return nil
+	}
+	return fmt.Errorf("native.cgroupdriver option %s not supported", cd)
+}
+
+// UsingSystemd returns true if cli option includes native.cgroupdriver=systemd
+func UsingSystemd(config *Config) bool {
+	return getCD(config) == cgroupSystemdDriver
 }
 
 // verifyPlatformContainerSettings performs platform-specific validation of the
@@ -418,11 +530,11 @@ func verifyPlatformContainerSettings(daemon *Daemon, hostConfig *containertypes.
 	warnings = append(warnings, w...)
 
 	if hostConfig.ShmSize < 0 {
-		return warnings, fmt.Errorf("SHM size must be greater then 0")
+		return warnings, fmt.Errorf("SHM size must be greater than 0")
 	}
 
 	if hostConfig.OomScoreAdj < -1000 || hostConfig.OomScoreAdj > 1000 {
-		return warnings, fmt.Errorf("Invalid value %d, range for oom score adj is [-1000, 1000].", hostConfig.OomScoreAdj)
+		return warnings, fmt.Errorf("Invalid value %d, range for oom score adj is [-1000, 1000]", hostConfig.OomScoreAdj)
 	}
 	if sysInfo.IPv4ForwardingDisabled {
 		warnings = append(warnings, "IPv4 forwarding is disabled. Networking will not work.")
@@ -433,20 +545,17 @@ func verifyPlatformContainerSettings(daemon *Daemon, hostConfig *containertypes.
 		if hostConfig.Privileged {
 			return warnings, fmt.Errorf("Privileged mode is incompatible with user namespaces")
 		}
-		if hostConfig.NetworkMode.IsHost() || hostConfig.NetworkMode.IsContainer() {
-			return warnings, fmt.Errorf("Cannot share the host or a container's network namespace when user namespaces are enabled")
+		if hostConfig.NetworkMode.IsHost() {
+			return warnings, fmt.Errorf("Cannot share the host's network namespace when user namespaces are enabled")
 		}
 		if hostConfig.PidMode.IsHost() {
 			return warnings, fmt.Errorf("Cannot share the host PID namespace when user namespaces are enabled")
-		}
-		if hostConfig.IpcMode.IsContainer() {
-			return warnings, fmt.Errorf("Cannot share a container's IPC namespace when user namespaces are enabled")
 		}
 		if hostConfig.ReadonlyRootfs {
 			return warnings, fmt.Errorf("Cannot use the --read-only option when user namespaces are enabled")
 		}
 	}
-	if hostConfig.CgroupParent != "" && daemon.usingSystemd() {
+	if hostConfig.CgroupParent != "" && UsingSystemd(daemon.configStore) {
 		// CgroupParent for systemd cgroup should be named as "xxx.slice"
 		if len(hostConfig.CgroupParent) <= 6 || !strings.HasSuffix(hostConfig.CgroupParent, ".slice") {
 			return warnings, fmt.Errorf("cgroup-parent for systemd cgroup should be a valid slice named as \"xxx.slice\"")
@@ -467,7 +576,10 @@ func verifyDaemonSettings(config *Config) error {
 	if !config.bridgeConfig.EnableIPTables && config.bridgeConfig.EnableIPMasq {
 		config.bridgeConfig.EnableIPMasq = false
 	}
-	if config.CgroupParent != "" && usingSystemd(config) {
+	if err := VerifyCgroupDriver(config); err != nil {
+		return err
+	}
+	if config.CgroupParent != "" && UsingSystemd(config) {
 		if len(config.CgroupParent) <= 6 || !strings.HasSuffix(config.CgroupParent, ".slice") {
 			return fmt.Errorf("cgroup-parent for systemd cgroup should be a valid slice named as \"xxx.slice\"")
 		}
@@ -500,7 +612,7 @@ func configureMaxThreads(config *Config) error {
 	return nil
 }
 
-// configureKernelSecuritySupport configures and validate security support for the kernel
+// configureKernelSecuritySupport configures and validates security support for the kernel
 func configureKernelSecuritySupport(config *Config, driverName string) error {
 	if config.EnableSelinuxSupport {
 		if selinuxEnabled() {
@@ -594,8 +706,8 @@ func initBridgeDriver(controller libnetwork.NetworkController, config *Config) e
 
 	nw, nw6List, err := ipamutils.ElectInterfaceAddresses(bridgeName)
 	if err == nil {
-		ipamV4Conf.PreferredPool = types.GetIPNetCanonical(nw).String()
-		hip, _ := types.GetHostPartIP(nw.IP, nw.Mask)
+		ipamV4Conf.PreferredPool = lntypes.GetIPNetCanonical(nw).String()
+		hip, _ := lntypes.GetHostPartIP(nw.IP, nw.Mask)
 		if hip.IsGlobalUnicast() {
 			ipamV4Conf.Gateway = nw.IP.String()
 		}
@@ -798,7 +910,6 @@ func parseRemappedRoot(usergrp string) (string, string, error) {
 			}
 			return "", "", fmt.Errorf("Error during %q user creation: %v", defaultRemappedID, err)
 		}
-		userID = luser.Uid
 		username = luser.Name
 		if len(idparts) == 1 {
 			// we only have a string username, and no group specified; look up gid from username as group
@@ -813,7 +924,7 @@ func parseRemappedRoot(usergrp string) (string, string, error) {
 
 	if len(idparts) == 2 {
 		// groupname or gid is separately specified and must be resolved
-		// to a unsigned 32-bit gid
+		// to an unsigned 32-bit gid
 		if gid, err := strconv.ParseInt(idparts[1], 10, 32); err == nil {
 			// must be a gid, take it as valid
 			groupID = int(gid)
@@ -824,11 +935,9 @@ func parseRemappedRoot(usergrp string) (string, string, error) {
 			groupname = lgrp.Name
 		} else {
 			// not a number; attempt a lookup
-			group, err := user.LookupGroup(idparts[1])
-			if err != nil {
-				return "", "", fmt.Errorf("Error during gid lookup for %q: %v", idparts[1], err)
+			if _, err := user.LookupGroup(idparts[1]); err != nil {
+				return "", "", fmt.Errorf("Error during groupname lookup for %q: %v", idparts[1], err)
 			}
-			groupID = group.Gid
 			groupname = idparts[1]
 		}
 	}
@@ -895,7 +1004,7 @@ func setupDaemonRoot(config *Config, rootDir string, rootUID, rootGID int) error
 	if config.RemappedRoot != "" {
 		config.Root = filepath.Join(rootDir, fmt.Sprintf("%d.%d", rootUID, rootGID))
 		logrus.Debugf("Creating user namespaced daemon root: %s", config.Root)
-		// Create the root directory if it doesn't exists
+		// Create the root directory if it doesn't exist
 		if err := idtools.MkdirAllAs(config.Root, 0700, rootUID, rootGID); err != nil {
 			return fmt.Errorf("Cannot create daemon root: %s: %v", config.Root, err)
 		}
@@ -947,11 +1056,85 @@ func (daemon *Daemon) conditionalMountOnStart(container *container.Container) er
 
 // conditionalUnmountOnCleanup is a platform specific helper function called
 // during the cleanup of a container to unmount.
-func (daemon *Daemon) conditionalUnmountOnCleanup(container *container.Container) {
-	daemon.Unmount(container)
+func (daemon *Daemon) conditionalUnmountOnCleanup(container *container.Container) error {
+	return daemon.Unmount(container)
 }
 
 func restoreCustomImage(is image.Store, ls layer.Store, rs reference.Store) error {
 	// Unix has no custom images to register
 	return nil
+}
+
+func (daemon *Daemon) stats(c *container.Container) (*types.StatsJSON, error) {
+	if !c.IsRunning() {
+		return nil, errNotRunning{c.ID}
+	}
+	stats, err := daemon.containerd.Stats(c.ID)
+	if err != nil {
+		return nil, err
+	}
+	s := &types.StatsJSON{}
+	cgs := stats.CgroupStats
+	if cgs != nil {
+		s.BlkioStats = types.BlkioStats{
+			IoServiceBytesRecursive: copyBlkioEntry(cgs.BlkioStats.IoServiceBytesRecursive),
+			IoServicedRecursive:     copyBlkioEntry(cgs.BlkioStats.IoServicedRecursive),
+			IoQueuedRecursive:       copyBlkioEntry(cgs.BlkioStats.IoQueuedRecursive),
+			IoServiceTimeRecursive:  copyBlkioEntry(cgs.BlkioStats.IoServiceTimeRecursive),
+			IoWaitTimeRecursive:     copyBlkioEntry(cgs.BlkioStats.IoWaitTimeRecursive),
+			IoMergedRecursive:       copyBlkioEntry(cgs.BlkioStats.IoMergedRecursive),
+			IoTimeRecursive:         copyBlkioEntry(cgs.BlkioStats.IoTimeRecursive),
+			SectorsRecursive:        copyBlkioEntry(cgs.BlkioStats.SectorsRecursive),
+		}
+		cpu := cgs.CpuStats
+		s.CPUStats = types.CPUStats{
+			CPUUsage: types.CPUUsage{
+				TotalUsage:        cpu.CpuUsage.TotalUsage,
+				PercpuUsage:       cpu.CpuUsage.PercpuUsage,
+				UsageInKernelmode: cpu.CpuUsage.UsageInKernelmode,
+				UsageInUsermode:   cpu.CpuUsage.UsageInUsermode,
+			},
+			ThrottlingData: types.ThrottlingData{
+				Periods:          cpu.ThrottlingData.Periods,
+				ThrottledPeriods: cpu.ThrottlingData.ThrottledPeriods,
+				ThrottledTime:    cpu.ThrottlingData.ThrottledTime,
+			},
+		}
+		mem := cgs.MemoryStats.Usage
+		s.MemoryStats = types.MemoryStats{
+			Usage:    mem.Usage,
+			MaxUsage: mem.MaxUsage,
+			Stats:    cgs.MemoryStats.Stats,
+			Failcnt:  mem.Failcnt,
+			Limit:    mem.Limit,
+		}
+		// if the container does not set memory limit, use the machineMemory
+		if mem.Limit > daemon.statsCollector.machineMemory && daemon.statsCollector.machineMemory > 0 {
+			s.MemoryStats.Limit = daemon.statsCollector.machineMemory
+		}
+		if cgs.PidsStats != nil {
+			s.PidsStats = types.PidsStats{
+				Current: cgs.PidsStats.Current,
+			}
+		}
+	}
+	s.Read = time.Unix(int64(stats.Timestamp), 0)
+	return s, nil
+}
+
+// setDefaultIsolation determines the default isolation mode for the
+// daemon to run in. This is only applicable on Windows
+func (daemon *Daemon) setDefaultIsolation() error {
+	return nil
+}
+
+func rootFSToAPIType(rootfs *image.RootFS) types.RootFS {
+	var layers []string
+	for _, l := range rootfs.DiffIDs {
+		layers = append(layers, l.String())
+	}
+	return types.RootFS{
+		Type:   rootfs.Type,
+		Layers: layers,
+	}
 }

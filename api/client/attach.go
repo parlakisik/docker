@@ -3,6 +3,7 @@ package client
 import (
 	"fmt"
 	"io"
+	"net/http/httputil"
 
 	"golang.org/x/net/context"
 
@@ -66,17 +67,14 @@ func (cli *DockerCli) CmdAttach(args ...string) error {
 		defer signal.StopCatch(sigc)
 	}
 
-	resp, err := cli.client.ContainerAttach(context.Background(), options)
-	if err != nil {
-		return err
+	resp, errAttach := cli.client.ContainerAttach(context.Background(), options)
+	if errAttach != nil && errAttach != httputil.ErrPersistEOF {
+		// ContainerAttach returns an ErrPersistEOF (connection closed)
+		// means server met an error and put it in Hijacked connection
+		// keep the error and read detailed error message from hijacked connection later
+		return errAttach
 	}
 	defer resp.Close()
-	if in != nil && c.Config.Tty {
-		if err := cli.setRawTerminal(); err != nil {
-			return err
-		}
-		defer cli.restoreTerminal(in)
-	}
 
 	if c.Config.Tty && cli.isTerminalOut {
 		height, width := cli.getTtySize()
@@ -92,9 +90,12 @@ func (cli *DockerCli) CmdAttach(args ...string) error {
 			logrus.Debugf("Error monitoring TTY size: %s", err)
 		}
 	}
-
-	if err := cli.holdHijackedConnection(c.Config.Tty, in, cli.out, cli.err, resp); err != nil {
+	if err := cli.holdHijackedConnection(context.Background(), c.Config.Tty, in, cli.out, cli.err, resp); err != nil {
 		return err
+	}
+
+	if errAttach != nil {
+		return errAttach
 	}
 
 	_, status, err := getExitCode(cli, options.ContainerID)

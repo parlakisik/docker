@@ -246,20 +246,9 @@ Create a container
                    "com.example.license": "GPL",
                    "com.example.version": "1.0"
            },
-           "Mounts": [
-             {
-               "Name": "fac362...80535",
-               "Source": "/data",
-               "Destination": "/data",
-               "Driver": "local",
-               "Mode": "ro,Z",
-               "RW": false,
-               "Propagation": ""
-             }
-           ],
            "Volumes": {
              "/volumes/data": {}
-           }
+           },
            "WorkingDir": "",
            "NetworkDisabled": false,
            "MacAddress": "12:34:56:78:9a:bc",
@@ -305,10 +294,21 @@ Create a container
              "Devices": [],
              "Ulimits": [{}],
              "LogConfig": { "Type": "json-file", "Config": {} },
-             "SecurityOpt": [""],
+             "SecurityOpt": [],
              "CgroupParent": "",
              "VolumeDriver": "",
              "ShmSize": 67108864
+          },
+          "NetworkingConfig": {
+          "EndpointsConfig": {
+              "isolated_nw" : {
+                  "IPAMConfig": {
+                      "IPv4Address":"172.20.30.33",
+                      "IPv6Address":"2001:db8:abcd::3033"
+                  },
+                  "Links":["container_1", "container_2"],
+                  "Aliases":["server_x", "server_y"]
+              }
           }
       }
 
@@ -366,7 +366,8 @@ Json Parameters:
 -   **Entrypoint** - Set the entry point for the container as a string or an array
       of strings.
 -   **Image** - A string specifying the image name to use for the container.
--   **Mounts** - An array of mount points in the container.
+-   **Volumes** - An object mapping mount point paths (strings) inside the
+      container to empty objects.
 -   **WorkingDir** - A string specifying the working directory for commands to
       run in.
 -   **NetworkDisabled** - Boolean value, when true disables networking for the
@@ -1984,7 +1985,7 @@ Tag the image `name` into a repository
 
 **Example response**:
 
-    HTTP/1.1 201 OK
+    HTTP/1.1 201 Created
 
 Query Parameters:
 
@@ -2133,6 +2134,7 @@ Display system-wide information
 
     {
         "Architecture": "x86_64",
+        "ClusterStore": "etcd://localhost:2379",
         "Containers": 11,
         "ContainersRunning": 7,
         "ContainersStopped": 3,
@@ -2140,21 +2142,9 @@ Display system-wide information
         "CpuCfsPeriod": true,
         "CpuCfsQuota": true,
         "Debug": false,
-        "DiscoveryBackend": "etcd://localhost:2379",
         "DockerRootDir": "/var/lib/docker",
         "Driver": "btrfs",
         "DriverStatus": [[""]],
-        "SystemStatus": [["State", "Healthy"]],
-        "Plugins": {
-            "Volume": [
-                "local"
-            ],
-            "Network": [
-                "null",
-                "host",
-                "bridge"
-            ]
-        },
         "ExecutionDriver": "native-0.1",
         "ExperimentalBuild": false,
         "HttpProxy": "http://test:test@localhost:8080",
@@ -2179,8 +2169,17 @@ Display system-wide information
         "NoProxy": "9.81.1.160",
         "OomKillDisable": true,
         "OSType": "linux",
-        "OomScoreAdj": 500,
         "OperatingSystem": "Boot2Docker",
+        "Plugins": {
+            "Volume": [
+                "local"
+            ],
+            "Network": [
+                "null",
+                "host",
+                "bridge"
+            ]
+        },
         "RegistryConfig": {
             "IndexConfigs": {
                 "docker.io": {
@@ -2194,9 +2193,10 @@ Display system-wide information
                 "127.0.0.0/8"
             ]
         },
+        "ServerVersion": "1.9.0",
         "SwapLimit": false,
+        "SystemStatus": [["State", "Healthy"]],
         "SystemTime": "2015-03-10T11:11:23.730591467-07:00"
-        "ServerVersion": "1.9.0"
     }
 
 Status Codes:
@@ -2548,7 +2548,7 @@ Sets up an exec instance in a running container `id`
 
 **Example response**:
 
-    HTTP/1.1 201 OK
+    HTTP/1.1 201 Created
     Content-Type: application/json
 
     {
@@ -2595,8 +2595,8 @@ interactive session with the `exec` command.
 
 **Example response**:
 
-    HTTP/1.1 201 OK
-    Content-Type: application/json
+    HTTP/1.1 200 OK
+    Content-Type: application/vnd.docker.raw-stream
 
     {{ STREAM }}
 
@@ -2628,7 +2628,7 @@ This API is valid only if `tty` was specified as part of creating and starting t
 
 **Example response**:
 
-    HTTP/1.1 201 OK
+    HTTP/1.1 201 Created
     Content-Type: text/plain
 
 Query Parameters:
@@ -2654,112 +2654,28 @@ Return low-level information about the `exec` command `id`.
 **Example response**:
 
     HTTP/1.1 200 OK
-    Content-Type: plain/text
+    Content-Type: application/json
 
     {
-      "ID" : "11fb006128e8ceb3942e7c58d77750f24210e35f879dd204ac975c184b820b39",
-      "Running" : false,
-      "ExitCode" : 2,
-      "ProcessConfig" : {
-        "privileged" : false,
-        "user" : "",
-        "tty" : false,
-        "entrypoint" : "sh",
-        "arguments" : [
-          "-c",
-          "exit 2"
-        ]
-      },
-      "OpenStdin" : false,
-      "OpenStderr" : false,
-      "OpenStdout" : false,
-      "Container" : {
-        "State" : {
-          "Status" : "running",
-          "Running" : true,
-          "Paused" : false,
-          "Restarting" : false,
-          "OOMKilled" : false,
-          "Pid" : 3650,
-          "ExitCode" : 0,
-          "Error" : "",
-          "StartedAt" : "2014-11-17T22:26:03.717657531Z",
-          "FinishedAt" : "0001-01-01T00:00:00Z"
+        "CanRemove": false,
+        "ContainerID": "b53ee82b53a40c7dca428523e34f741f3abc51d9f297a14ff874bf761b995126",
+        "DetachKeys": "",
+        "ExitCode": 2,
+        "ID": "f33bbfb39f5b142420f4759b2348913bd4a8d1a6d7fd56499cb41a1bb91d7b3b",
+        "OpenStderr": true,
+        "OpenStdin": true,
+        "OpenStdout": true,
+        "ProcessConfig": {
+            "arguments": [
+                "-c",
+                "exit 2"
+            ],
+            "entrypoint": "sh",
+            "privileged": false,
+            "tty": true,
+            "user": "1000"
         },
-        "ID" : "8f177a186b977fb451136e0fdf182abff5599a08b3c7f6ef0d36a55aaf89634c",
-        "Created" : "2014-11-17T22:26:03.626304998Z",
-        "Path" : "date",
-        "Args" : [],
-        "Config" : {
-          "Hostname" : "8f177a186b97",
-          "Domainname" : "",
-          "User" : "",
-          "AttachStdin" : false,
-          "AttachStdout" : false,
-          "AttachStderr" : false,
-          "ExposedPorts" : null,
-          "Tty" : false,
-          "OpenStdin" : false,
-          "StdinOnce" : false,
-          "Env" : [ "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" ],
-          "Cmd" : [
-            "date"
-          ],
-          "Image" : "ubuntu",
-          "Volumes" : null,
-          "WorkingDir" : "",
-          "Entrypoint" : null,
-          "NetworkDisabled" : false,
-          "MacAddress" : "",
-          "OnBuild" : null,
-          "SecurityOpt" : null
-        },
-        "Image" : "5506de2b643be1e6febbf3b8a240760c6843244c41e12aa2f60ccbb7153d17f5",
-        "NetworkSettings": {
-            "Bridge": "",
-            "SandboxID": "",
-            "HairpinMode": false,
-            "LinkLocalIPv6Address": "",
-            "LinkLocalIPv6PrefixLen": 0,
-            "Ports": null,
-            "SandboxKey": "",
-            "SecondaryIPAddresses": null,
-            "SecondaryIPv6Addresses": null,
-            "EndpointID": "",
-            "Gateway": "",
-            "GlobalIPv6Address": "",
-            "GlobalIPv6PrefixLen": 0,
-            "IPAddress": "",
-            "IPPrefixLen": 0,
-            "IPv6Gateway": "",
-            "MacAddress": "",
-            "Networks": {
-                "bridge": {
-                    "NetworkID": "7ea29fc1412292a2d7bba362f9253545fecdfa8ce9a6e37dd10ba8bee7129812",
-                    "EndpointID": "7587b82f0dada3656fda26588aee72630c6fab1536d36e394b2bfbcf898c971d",
-                    "Gateway": "172.17.0.1",
-                    "IPAddress": "172.17.0.2",
-                    "IPPrefixLen": 16,
-                    "IPv6Gateway": "",
-                    "GlobalIPv6Address": "",
-                    "GlobalIPv6PrefixLen": 0,
-                    "MacAddress": "02:42:ac:12:00:02"
-                }
-            }
-        },
-        "ResolvConfPath" : "/var/lib/docker/containers/8f177a186b977fb451136e0fdf182abff5599a08b3c7f6ef0d36a55aaf89634c/resolv.conf",
-        "HostnamePath" : "/var/lib/docker/containers/8f177a186b977fb451136e0fdf182abff5599a08b3c7f6ef0d36a55aaf89634c/hostname",
-        "HostsPath" : "/var/lib/docker/containers/8f177a186b977fb451136e0fdf182abff5599a08b3c7f6ef0d36a55aaf89634c/hosts",
-        "LogPath": "/var/lib/docker/containers/1eb5fabf5a03807136561b3c00adcd2992b535d624d5e18b6cdc6a6844d9767b/1eb5fabf5a03807136561b3c00adcd2992b535d624d5e18b6cdc6a6844d9767b-json.log",
-        "Name" : "/test",
-        "Driver" : "aufs",
-        "ExecDriver" : "native-0.2",
-        "MountLabel" : "",
-        "ProcessLabel" : "",
-        "AppArmorProfile" : "",
-        "RestartCount" : 0,
-        "Mounts" : []
-      }
+        "Running": false
     }
 
 Status Codes:
@@ -2790,7 +2706,8 @@ Status Codes:
           "Driver": "local",
           "Mountpoint": "/var/lib/docker/volumes/tardis"
         }
-      ]
+      ],
+      "Warnings": []
     }
 
 Query Parameters:
@@ -3046,11 +2963,17 @@ Content-Type: application/json
   "Name":"isolated_nw",
   "Driver":"bridge",
   "IPAM":{
-    "Config":[{
-      "Subnet":"172.20.0.0/16",
-      "IPRange":"172.20.10.0/24",
-      "Gateway":"172.20.10.11"
-    }],
+    "Config":[
+       {
+          "Subnet":"172.20.0.0/16",
+          "IPRange":"172.20.10.0/24",
+          "Gateway":"172.20.10.11"
+        },
+        {
+          "Subnet":"2001:db8:abcd::/64",
+          "Gateway":"2001:db8:abcd::1011"
+        }
+    ],
     "Options": {
         "foo": "bar"
     }
@@ -3089,7 +3012,7 @@ JSON Parameters:
 
 `POST /networks/(id)/connect`
 
-Connects a container to a network
+Connect a container to a network
 
 **Example request**:
 
@@ -3126,7 +3049,7 @@ JSON Parameters:
 
 `POST /networks/(id)/disconnect`
 
-Disconnects a container from a network
+Disconnect a container from a network
 
 **Example request**:
 

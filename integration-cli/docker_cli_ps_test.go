@@ -653,7 +653,22 @@ func (s *DockerSuite) TestPsFormatMultiNames(c *check.C) {
 		truncNames = append(truncNames, l)
 	}
 	c.Assert(expected, checker.DeepEquals, truncNames, check.Commentf("Expected array with truncated names: %v, got: %v", expected, truncNames))
+}
 
+// Test for GitHub issue #21772
+func (s *DockerSuite) TestPsNamesMultipleTime(c *check.C) {
+	runSleepingContainer(c, "--name=test1")
+	runSleepingContainer(c, "--name=test2")
+
+	//use the new format capabilities to list the names twice
+	out, _ := dockerCmd(c, "ps", "--format", "{{.Names}} {{.Names}}")
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	expected := []string{"test2 test2", "test1 test1"}
+	var names []string
+	for _, l := range lines {
+		names = append(names, l)
+	}
+	c.Assert(expected, checker.DeepEquals, names, check.Commentf("Expected array with names displayed twice: %v, got: %v", expected, names))
 }
 
 func (s *DockerSuite) TestPsFormatHeaders(c *check.C) {
@@ -764,22 +779,40 @@ func (s *DockerSuite) TestPsShowMounts(c *check.C) {
 	mp := prefix + slash + "test"
 
 	dockerCmd(c, "volume", "create", "--name", "ps-volume-test")
+	// volume mount containers
 	runSleepingContainer(c, "--name=volume-test-1", "--volume", "ps-volume-test:"+mp)
 	c.Assert(waitRun("volume-test-1"), checker.IsNil)
 	runSleepingContainer(c, "--name=volume-test-2", "--volume", mp)
 	c.Assert(waitRun("volume-test-2"), checker.IsNil)
+	// bind mount container
+	var bindMountSource string
+	var bindMountDestination string
+	if DaemonIsWindows.Condition() {
+		bindMountSource = "c:\\"
+		bindMountDestination = "c:\\t"
+	} else {
+		bindMountSource = "/tmp"
+		bindMountDestination = "/t"
+	}
+	runSleepingContainer(c, "--name=bind-mount-test", "-v", bindMountSource+":"+bindMountDestination)
+	c.Assert(waitRun("bind-mount-test"), checker.IsNil)
 
 	out, _ := dockerCmd(c, "ps", "--format", "{{.Names}} {{.Mounts}}")
 
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	c.Assert(lines, checker.HasLen, 2)
+	c.Assert(lines, checker.HasLen, 3)
 
 	fields := strings.Fields(lines[0])
+	c.Assert(fields, checker.HasLen, 2)
+	c.Assert(fields[0], checker.Equals, "bind-mount-test")
+	c.Assert(fields[1], checker.Equals, bindMountSource)
+
+	fields = strings.Fields(lines[1])
 	c.Assert(fields, checker.HasLen, 2)
 
 	annonymounsVolumeID := fields[1]
 
-	fields = strings.Fields(lines[1])
+	fields = strings.Fields(lines[2])
 	c.Assert(fields[1], checker.Equals, "ps-volume-test")
 
 	// filter by volume name
@@ -805,6 +838,28 @@ func (s *DockerSuite) TestPsShowMounts(c *check.C) {
 	c.Assert(fields[1], checker.Equals, annonymounsVolumeID)
 	fields = strings.Fields(lines[1])
 	c.Assert(fields[1], checker.Equals, "ps-volume-test")
+
+	// filter by bind mount source
+	out, _ = dockerCmd(c, "ps", "--format", "{{.Names}} {{.Mounts}}", "--filter", "volume="+bindMountSource)
+
+	lines = strings.Split(strings.TrimSpace(string(out)), "\n")
+	c.Assert(lines, checker.HasLen, 1)
+
+	fields = strings.Fields(lines[0])
+	c.Assert(fields, checker.HasLen, 2)
+	c.Assert(fields[0], checker.Equals, "bind-mount-test")
+	c.Assert(fields[1], checker.Equals, bindMountSource)
+
+	// filter by bind mount destination
+	out, _ = dockerCmd(c, "ps", "--format", "{{.Names}} {{.Mounts}}", "--filter", "volume="+bindMountDestination)
+
+	lines = strings.Split(strings.TrimSpace(string(out)), "\n")
+	c.Assert(lines, checker.HasLen, 1)
+
+	fields = strings.Fields(lines[0])
+	c.Assert(fields, checker.HasLen, 2)
+	c.Assert(fields[0], checker.Equals, "bind-mount-test")
+	c.Assert(fields[1], checker.Equals, bindMountSource)
 
 	// empty results filtering by unknown mount point
 	out, _ = dockerCmd(c, "ps", "--format", "{{.Names}} {{.Mounts}}", "--filter", "volume="+prefix+slash+"this-path-was-never-mounted")

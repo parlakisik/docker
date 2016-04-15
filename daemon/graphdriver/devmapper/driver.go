@@ -108,7 +108,7 @@ func (d *Driver) GetMetadata(id string) (map[string]string, error) {
 
 // Cleanup unmounts a device.
 func (d *Driver) Cleanup() error {
-	err := d.DeviceSet.Shutdown()
+	err := d.DeviceSet.Shutdown(d.home)
 
 	if err2 := mount.Unmount(d.home); err == nil {
 		err = err2
@@ -117,9 +117,15 @@ func (d *Driver) Cleanup() error {
 	return err
 }
 
+// CreateReadWrite creates a layer that is writable for use as a container
+// file system.
+func (d *Driver) CreateReadWrite(id, parent, mountLabel string, storageOpt map[string]string) error {
+	return d.Create(id, parent, mountLabel, storageOpt)
+}
+
 // Create adds a device with a given id and the parent.
-func (d *Driver) Create(id, parent, mountLabel string) error {
-	if err := d.DeviceSet.AddDevice(id, parent); err != nil {
+func (d *Driver) Create(id, parent, mountLabel string, storageOpt map[string]string) error {
+	if err := d.DeviceSet.AddDevice(id, parent, storageOpt); err != nil {
 		return err
 	}
 

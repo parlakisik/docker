@@ -7,6 +7,18 @@ import (
 	"github.com/docker/libnetwork/datastore"
 )
 
+func (c *controller) initScopedStore(scope string, scfg *datastore.ScopeCfg) error {
+	store, err := datastore.NewDataStore(scope, scfg)
+	if err != nil {
+		return err
+	}
+	c.Lock()
+	c.stores = append(c.stores, store)
+	c.Unlock()
+
+	return nil
+}
+
 func (c *controller) initStores() error {
 	c.Lock()
 	if c.cfg == nil {
@@ -18,13 +30,9 @@ func (c *controller) initStores() error {
 	c.Unlock()
 
 	for scope, scfg := range scopeConfigs {
-		store, err := datastore.NewDataStore(scope, scfg)
-		if err != nil {
+		if err := c.initScopedStore(scope, scfg); err != nil {
 			return err
 		}
-		c.Lock()
-		c.stores = append(c.stores, store)
-		c.Unlock()
 	}
 
 	c.startWatch()
@@ -71,7 +79,7 @@ func (c *controller) getNetworkFromStore(nid string) (*network, error) {
 
 		ec := &endpointCnt{n: n}
 		err = store.GetObject(datastore.Key(ec.Key()...), ec)
-		if err != nil {
+		if err != nil && !n.inDelete {
 			return nil, fmt.Errorf("could not find endpoint count for network %s: %v", n.Name(), err)
 		}
 
@@ -104,7 +112,7 @@ func (c *controller) getNetworksForScope(scope string) ([]*network, error) {
 
 		ec := &endpointCnt{n: n}
 		err = store.GetObject(datastore.Key(ec.Key()...), ec)
-		if err != nil {
+		if err != nil && !n.inDelete {
 			log.Warnf("Could not find endpoint count key %s for network %s while listing: %v", datastore.Key(ec.Key()...), n.Name(), err)
 			continue
 		}
@@ -139,7 +147,7 @@ func (c *controller) getNetworksFromStore() ([]*network, error) {
 
 			ec := &endpointCnt{n: n}
 			err = store.GetObject(datastore.Key(ec.Key()...), ec)
-			if err != nil {
+			if err != nil && !n.inDelete {
 				log.Warnf("could not find endpoint count key %s for network %s while listing: %v", datastore.Key(ec.Key()...), n.Name(), err)
 				continue
 			}
@@ -427,4 +435,21 @@ func (c *controller) startWatch() {
 	c.nmap = make(map[string]*netWatch)
 
 	go c.watchLoop()
+}
+
+func (c *controller) networkCleanup() {
+	networks, err := c.getNetworksFromStore()
+	if err != nil {
+		log.Warnf("Could not retrieve networks from store(s) during network cleanup: %v", err)
+		return
+	}
+
+	for _, n := range networks {
+		if n.inDelete {
+			log.Infof("Removing stale network %s (%s)", n.Name(), n.ID())
+			if err := n.delete(true); err != nil {
+				log.Debugf("Error while removing stale network: %v", err)
+			}
+		}
+	}
 }

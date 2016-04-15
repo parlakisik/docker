@@ -78,7 +78,7 @@ management that can assist your implementation.
 
 When you create a network, Engine creates a non-overlapping subnetwork for the
 network by default. You can override this default and specify a subnetwork
-directly using the the `--subnet` option. On a `bridge` network you can only
+directly using the `--subnet` option. On a `bridge` network you can only
 specify a single subnet. An `overlay` network supports multiple subnets.
 
 > **Note** : It is highly recommended to use the `--subnet` option while creating
@@ -87,7 +87,7 @@ specify a single subnet. An `overlay` network supports multiple subnets.
 > in your infrastructure that is not managed by docker. Such overlaps can cause
 > connectivity issues or failures when containers are connected to that network.
 
-In addition to the `--subnetwork` option, you also specify the `--gateway` `--ip-range` and `--aux-address` options.
+In addition to the `--subnet` option, you also specify the `--gateway` `--ip-range` and `--aux-address` options.
 
 ```bash
 $ docker network create -d overlay

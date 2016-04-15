@@ -187,6 +187,7 @@ func New(cfgOptions ...config.Option) (NetworkController, error) {
 
 	c.sandboxCleanup()
 	c.cleanupLocalEndpoints()
+	c.networkCleanup()
 
 	if err := c.startExternalKeyListener(); err != nil {
 		return nil, err
@@ -217,6 +218,9 @@ func (c *controller) ReloadConfiguration(cfgOptions ...config.Option) error {
 				return types.ForbiddenErrorf("cannot accept new configuration because it modifies an existing datastore client")
 			}
 		} else {
+			if err := c.initScopedStore(s, nSCfg); err != nil {
+				return err
+			}
 			update = true
 		}
 	}
@@ -227,10 +231,6 @@ func (c *controller) ReloadConfiguration(cfgOptions ...config.Option) error {
 	c.Lock()
 	c.cfg = cfg
 	c.Unlock()
-
-	if err := c.initStores(); err != nil {
-		return err
-	}
 
 	if c.discovery == nil && c.cfg.Cluster.Watcher != nil {
 		if err := c.initDiscovery(c.cfg.Cluster.Watcher); err != nil {
@@ -479,19 +479,23 @@ func (c *controller) NewNetwork(networkType, name string, options ...NetworkOpti
 		}
 	}()
 
-	if err = c.updateToStore(network); err != nil {
+	// First store the endpoint count, then the network. To avoid to
+	// end up with a datastore containing a network and not an epCnt,
+	// in case of an ungraceful shutdown during this function call.
+	epCnt := &endpointCnt{n: network}
+	if err = c.updateToStore(epCnt); err != nil {
 		return nil, err
 	}
 	defer func() {
 		if err != nil {
-			if e := c.deleteFromStore(network); e != nil {
-				log.Warnf("couldnt rollback from store, network %s on failure (%v): %v", network.name, err, e)
+			if e := c.deleteFromStore(epCnt); e != nil {
+				log.Warnf("couldnt rollback from store, epCnt %v on failure (%v): %v", epCnt, err, e)
 			}
 		}
 	}()
 
-	network.epCnt = &endpointCnt{n: network}
-	if err = c.updateToStore(network.epCnt); err != nil {
+	network.epCnt = epCnt
+	if err = c.updateToStore(network); err != nil {
 		return nil, err
 	}
 
@@ -521,6 +525,9 @@ func (c *controller) Networks() []Network {
 	}
 
 	for _, n := range networks {
+		if n.inDelete {
+			continue
+		}
 		list = append(list, n)
 	}
 

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/docker/docker/utils"
 	"github.com/go-check/check"
 )
 
@@ -28,6 +29,10 @@ var (
 	DaemonIsLinux = testRequirement{
 		func() bool { return daemonPlatform == "linux" },
 		"Test requires a Linux daemon",
+	}
+	NotExperimentalDaemon = testRequirement{
+		func() bool { return !utils.ExperimentalBuild() },
+		"Test requires a non experimental daemon",
 	}
 	NotArm = testRequirement{
 		func() bool { return os.Getenv("DOCKER_ENGINE_GOARCH") != "arm" },
@@ -92,10 +97,10 @@ var (
 			// for now notary binary is built only if we're running inside
 			// container through `make test`. Figure that out by testing if
 			// notary-server binary is in PATH.
-			_, err := exec.LookPath(notaryBinary)
+			_, err := exec.LookPath(notaryServerBinary)
 			return err == nil
 		},
-		fmt.Sprintf("Test requires an environment that can host %s in the same host", notaryBinary),
+		fmt.Sprintf("Test requires an environment that can host %s in the same host", notaryServerBinary),
 	}
 	NotaryServerHosting = testRequirement{
 		func() bool {
@@ -109,22 +114,14 @@ var (
 	}
 	NotOverlay = testRequirement{
 		func() bool {
-			cmd := exec.Command("grep", "^overlay / overlay", "/proc/mounts")
-			if err := cmd.Run(); err != nil {
-				return true
-			}
-			return false
+			return !strings.HasPrefix(daemonStorageDriver, "overlay")
 		},
 		"Test requires underlying root filesystem not be backed by overlay.",
 	}
 
 	Devicemapper = testRequirement{
 		func() bool {
-			cmd := exec.Command("grep", "^devicemapper / devicemapper", "/proc/mounts")
-			if err := cmd.Run(); err != nil {
-				return false
-			}
-			return true
+			return strings.HasPrefix(daemonStorageDriver, "devicemapper")
 		},
 		"Test requires underlying root filesystem to be backed by devicemapper.",
 	}

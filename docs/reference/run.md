@@ -284,7 +284,7 @@ with `docker run --net none` which disables all incoming and outgoing
 networking. In cases like this, you would perform I/O through files or
 `STDIN` and `STDOUT` only.
 
-Publishing ports and linking to other containers only works with the the default (bridge). The linking feature is a legacy feature. You should always prefer using Docker network drivers over linking.
+Publishing ports and linking to other containers only works with the default (bridge). The linking feature is a legacy feature. You should always prefer using Docker network drivers over linking.
 
 Your container will use the same DNS servers as the host by default, but
 you can override this with `--dns`.
@@ -599,38 +599,41 @@ but the volume for `/bar` will not. Volumes inheritted via `--volumes-from` will
 with the same logic -- if the original volume was specified with a name it will **not** be removed.
 
 ## Security configuration
-    --security-opt="label:user:USER"   : Set the label user for the container
-    --security-opt="label:role:ROLE"   : Set the label role for the container
-    --security-opt="label:type:TYPE"   : Set the label type for the container
-    --security-opt="label:level:LEVEL" : Set the label level for the container
-    --security-opt="label:disable"     : Turn off label confinement for the container
-    --security-opt="apparmor:PROFILE"  : Set the apparmor profile to be applied
+    --security-opt="label=user:USER"   : Set the label user for the container
+    --security-opt="label=role:ROLE"   : Set the label role for the container
+    --security-opt="label=type:TYPE"   : Set the label type for the container
+    --security-opt="label=level:LEVEL" : Set the label level for the container
+    --security-opt="label=disable"     : Turn off label confinement for the container
+    --security-opt="apparmor=PROFILE"  : Set the apparmor profile to be applied
                                          to the container
     --security-opt="no-new-privileges" : Disable container processes from gaining
                                          new privileges
+    --security-opt="seccomp=unconfined": Turn off seccomp confinement for the container
+    --security-opt="seccomp=profile.json: White listed syscalls seccomp Json file to be used as a seccomp filter
+
 
 You can override the default labeling scheme for each container by specifying
 the `--security-opt` flag. For example, you can specify the MCS/MLS level, a
 requirement for MLS systems. Specifying the level in the following command
 allows you to share the same content between containers.
 
-    $ docker run --security-opt label:level:s0:c100,c200 -it fedora bash
+    $ docker run --security-opt label=level:s0:c100,c200 -it fedora bash
 
 An MLS example might be:
 
-    $ docker run --security-opt label:level:TopSecret -it rhel7 bash
+    $ docker run --security-opt label=level:TopSecret -it rhel7 bash
 
 To disable the security labeling for this container versus running with the
 `--permissive` flag, use the following command:
 
-    $ docker run --security-opt label:disable -it fedora bash
+    $ docker run --security-opt label=disable -it fedora bash
 
 If you want a tighter security policy on the processes within a container,
 you can specify an alternate type for the container. You could run a container
 that is only allowed to listen on Apache ports by executing the following
 command:
 
-    $ docker run --security-opt label:type:svirt_apache_t -it centos bash
+    $ docker run --security-opt label=type:svirt_apache_t -it centos bash
 
 > **Note**: You would have to write policy defining a `svirt_apache_t` type.
 
@@ -1053,7 +1056,7 @@ Both flags take limits in the `<device-path>:<limit>` format. Both read and
 write rates must be a positive integer.
 
 ## Additional groups
-    --group-add: Add Linux capabilities
+    --group-add: Add additional groups to run as 
 
 By default, the docker container process runs with the supplementary groups looked
 up for the specified user. If one wants to add more to that list of groups, then
@@ -1075,7 +1078,7 @@ one can use this flag:
 > these cases to create your own custom seccomp profile based off our
 > [default](https://github.com/docker/docker/blob/master/profiles/seccomp/default.json).
 > Or if you don't want to run with the default seccomp profile, you can pass
-> `--security-opt=seccomp:unconfined` on run.
+> `--security-opt=seccomp=unconfined` on run.
 
 By default, Docker containers are "unprivileged" and cannot, for
 example, run a Docker daemon inside a Docker container. This is because
@@ -1397,17 +1400,19 @@ The example below mounts an empty tmpfs into the container with the `rw`,
 ### VOLUME (shared filesystems)
 
     -v, --volume=[host-src:]container-dest[:<options>]: Bind mount a volume.
-    The comma-delimited `options` are [rw|ro], [z|Z], or
-    [[r]shared|[r]slave|[r]private]. The 'host-src' is an absolute path or a
-    name value.
+    The comma-delimited `options` are [rw|ro], [z|Z],
+    [[r]shared|[r]slave|[r]private], and [nocopy].
+    The 'host-src' is an absolute path or a name value.
 
     If neither 'rw' or 'ro' is specified then the volume is mounted in
     read-write mode.
 
-    --volumes-from="": Mount all volumes from the given container(s)
+    The `nocopy` modes is used to disable automatic copying requested volume
+    path in the container to the volume storage location.
+    For named volumes, `copy` is the default mode. Copy modes are not supported
+    for bind-mounted volumes.
 
-> **Note**:
-> The auto-creation of the host path has been [*deprecated*](../deprecated.md#auto-creating-missing-host-paths-for-bind-mounts).
+    --volumes-from="": Mount all volumes from the given container(s)
 
 > **Note**:
 > When using systemd to manage the Docker daemon's start and stop, in the systemd

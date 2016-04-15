@@ -71,6 +71,7 @@
 	# - close an issue or pull request when it's inappropriate or off-topic
 
 		people = [
+			"programmerq",
 			"thajeztah"
 		]
 
@@ -81,7 +82,7 @@
 	# Thank you!
 
 		people = [
-			# As a maintainer, Erik was responsible for the "builder", and 
+			# As a maintainer, Erik was responsible for the "builder", and
 			# started the first designs for the new networking model in
 			# Docker. Erik is now working on all kinds of plugins for Docker
 			# (https://github.com/contiv) and various open source projects
@@ -170,7 +171,7 @@
 
 	[people.jfrazelle]
 	Name = "Jessie Frazelle"
-	Email = "j@docker.com"
+	Email = "jess@linux.com"
 	GitHub = "jfrazelle"
 
 	[people.lk4d4]
@@ -187,6 +188,11 @@
 	Name = "Mary Anthony"
 	Email = "mary.anthony@docker.com"
 	GitHub = "moxiegirl"
+
+	[people.programmerq]
+	Name = "Jeff Anderson"
+	Email = "jeff@docker.com"
+	GitHub = "programmerq"
 
 	[people.runcom]
 	Name = "Antonio Murdaca"

@@ -15,6 +15,7 @@ docker-daemon - Enable daemon mode
 [**--cluster-advertise**[=*[]*]]
 [**--cluster-store-opt**[=*map[]*]]
 [**--config-file**[=*/etc/docker/daemon.json*]]
+[**--containerd**[=*SOCKET-PATH*]]
 [**-D**|**--debug**]
 [**--default-gateway**[=*DEFAULT-GATEWAY*]]
 [**--default-gateway-v6**[=*DEFAULT-GATEWAY-V6*]]
@@ -101,6 +102,9 @@ format.
 **--config-file**="/etc/docker/daemon.json"
   Specifies the JSON file path to load the configuration from.
 
+**--containerd**=""
+  Path to containerd socket.
+
 **-D**, **--debug**=*true*|*false*
   Enable debug mode. Default is false.
 
@@ -126,10 +130,10 @@ format.
   DNS search domains to use.
 
 **--exec-opt**=[]
-  Set exec driver options. See EXEC DRIVER OPTIONS.
+  Set runtime execution options. See RUNTIME EXECUTION OPTIONS.
 
 **--exec-root**=""
-  Path to use as the root of the Docker exec driver. Default is `/var/run/docker`.
+  Path to use as the root of the Docker execution state files. Default is `/var/run/docker`.
 
 **--fixed-cidr**=""
   IPv4 subnet for fixed IPs (e.g., 10.20.0.0/16); this subnet must be nested in the bridge subnet (which is defined by \-b or \-\-bip)
@@ -265,19 +269,27 @@ allocating images and container snapshots.
 
 Specifies a custom block storage device to use for the thin pool.
 
-If using a block device for device mapper storage, it is best to use
-`lvm` to create and manage the thin-pool volume. This volume is then
-handed to Docker to create snapshot volumes needed for images and
-containers.
+If using a block device for device mapper storage, it is best to use `lvm`
+to create and manage the thin-pool volume. This volume is then handed to Docker
+to exclusively create snapshot volumes needed for images and containers.
 
-Managing the thin-pool outside of Docker makes for the most feature-rich method
-of having Docker utilize device mapper thin provisioning as the backing storage
-for Docker's containers. The highlights of the LVM-based thin-pool management
-feature include: automatic or interactive thin-pool resize support, dynamically
-changing thin-pool features, automatic thinp metadata checking when lvm activates
-the thin-pool, etc.
+Managing the thin-pool outside of Engine makes for the most feature-rich
+method of having Docker utilize device mapper thin provisioning as the
+backing storage for Docker containers. The highlights of the lvm-based
+thin-pool management feature include: automatic or interactive thin-pool
+resize support, dynamically changing thin-pool features, automatic thinp
+metadata checking when lvm activates the thin-pool, etc.
 
-Example use: `docker daemon --storage-opt dm.thinpooldev=/dev/mapper/thin-pool`
+As a fallback if no thin pool is provided, loopback files are
+created. Loopback is very slow, but can be used without any
+pre-configuration of storage. It is strongly recommended that you do
+not use loopback in production. Ensure your Engine daemon has a
+`--storage-opt dm.thinpooldev` argument provided.
+
+Example use:
+
+   $ docker daemon \
+         --storage-opt dm.thinpooldev=/dev/mapper/thin-pool
 
 #### dm.basesize
 
@@ -289,13 +301,13 @@ will use more space for base images the larger the device
 is.
 
 The base device size can be increased at daemon restart which will allow
-all future images and containers (based on those new images) to be of the 
+all future images and containers (based on those new images) to be of the
 new base device size.
 
-Example use: `docker daemon --storage-opt dm.basesize=50G` 
+Example use: `docker daemon --storage-opt dm.basesize=50G`
 
-This will increase the base device size to 50G. The Docker daemon will throw an 
-error if existing base device size is larger than 50G. A user can use 
+This will increase the base device size to 50G. The Docker daemon will throw an
+error if existing base device size is larger than 50G. A user can use
 this option to expand the base device size however shrinking is not permitted.
 
 This value affects the system-wide "base" empty filesystem that may already
@@ -465,6 +477,32 @@ this topic, see
 Otherwise, set this flag for migrating existing Docker daemons to a
 daemon with a supported environment.
 
+#### dm.min_free_space
+
+Specifies the min free space percent in a thin pool require for new device
+creation to succeed. This check applies to both free data space as well
+as free metadata space. Valid values are from 0% - 99%. Value 0% disables
+free space checking logic. If user does not specify a value for this option,
+the Engine uses a default value of 10%.
+
+Whenever a new a thin pool device is created (during `docker pull` or during
+container creation), the Engine checks if the minimum free space is
+available. If the space is unavailable, then device creation fails and any
+relevant `docker` operation fails.
+
+To recover from this error, you must create more free space in the thin pool to
+recover from the error. You can create free space by deleting some images
+and containers from tge thin pool. You can also add
+more storage to the thin pool.
+
+To add more space to an LVM (logical volume management) thin pool, just add
+more storage to the  group container thin pool; this should automatically
+resolve any errors. If your configuration uses loop devices, then stop the
+Engine daemon, grow the size of loop files and restart the daemon to resolve
+the issue.
+
+Example use:: `docker daemon --storage-opt dm.min_free_space=10%`
+
 ## ZFS options
 
 #### zfs.fsname
@@ -474,30 +512,6 @@ By default docker will pick up the zfs filesystem where docker graph
 (`/var/lib/docker`) is located.
 
 Example use: `docker daemon -s zfs --storage-opt zfs.fsname=zroot/docker`
-
-#### dm.min_free_space
-
-Specifies the min free space percent in thin pool require for new device
-creation to succeed. This check applies to both free data space as well
-as free metadata space. Valid values are from 0% - 99%. Value 0% disables
-free space checking logic. If user does not specify a value for this optoin,
-then default value for this option is 10%.
-
-Whenever a new thin pool device is created (during docker pull or
-during container creation), docker will check minimum free space is
-available as specified by this parameter. If that is not the case, then
-device creation will fail and docker operation will fail.
-
-One will have to create more free space in thin pool to recover from the
-error. Either delete some of the images and containers from thin pool and
-create free space or add more storage to thin pool.
-
-For lvm thin pool, one can add more storage to volume group container thin
-pool and that should automatically resolve it. If loop devices are being
-used, then stop docker, grow the size of loop files and restart docker and
-that should resolve the issue.
-
-Example use: `docker daemon --storage-opt dm.min_free_space_percent=10%`
 
 # CLUSTER STORE OPTIONS
 

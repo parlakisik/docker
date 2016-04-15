@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/docker/docker/container"
-	"github.com/docker/docker/daemon/execdriver"
 	"github.com/docker/docker/volume"
 	"github.com/docker/engine-api/types"
 	containertypes "github.com/docker/engine-api/types/container"
@@ -21,15 +20,20 @@ var (
 	ErrVolumeReadonly = errors.New("mounted volume is marked read-only")
 )
 
-type mounts []execdriver.Mount
+type mounts []container.Mount
 
 // volumeToAPIType converts a volume.Volume to the type used by the remote API
 func volumeToAPIType(v volume.Volume) *types.Volume {
-	return &types.Volume{
-		Name:       v.Name(),
-		Driver:     v.DriverName(),
-		Mountpoint: v.Path(),
+	tv := &types.Volume{
+		Name:   v.Name(),
+		Driver: v.DriverName(),
 	}
+	if v, ok := v.(interface {
+		Labels() map[string]string
+	}); ok {
+		tv.Labels = v.Labels()
+	}
+	return tv
 }
 
 // Len returns the number of mounts. Used in sorting.
@@ -119,7 +123,7 @@ func (daemon *Daemon) registerMountPoints(container *container.Container, hostCo
 
 		if len(bind.Name) > 0 {
 			// create the volume
-			v, err := daemon.volumes.CreateWithRef(bind.Name, bind.Driver, container.ID, nil)
+			v, err := daemon.volumes.CreateWithRef(bind.Name, bind.Driver, container.ID, nil, nil)
 			if err != nil {
 				return err
 			}
@@ -132,6 +136,7 @@ func (daemon *Daemon) registerMountPoints(container *container.Container, hostCo
 				bind = setBindModeIfNull(bind)
 			}
 		}
+
 		if label.RelabelNeeded(bind.Mode) {
 			if err := label.Relabel(bind.Source, container.MountLabel, label.IsShared(bind.Mode)); err != nil {
 				return err

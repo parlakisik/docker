@@ -16,13 +16,16 @@ import (
 	"github.com/docker/docker/dockerversion"
 	"github.com/docker/docker/image"
 	"github.com/docker/docker/layer"
+	"github.com/docker/docker/pkg/sysinfo"
 	"github.com/docker/docker/reference"
 	"github.com/docker/docker/runconfig"
-	containertypes "github.com/docker/engine-api/types/container"
 	// register the windows graph driver
 	"github.com/docker/docker/daemon/graphdriver/windows"
 	"github.com/docker/docker/pkg/idtools"
+	"github.com/docker/docker/pkg/parsers"
 	"github.com/docker/docker/pkg/system"
+	"github.com/docker/engine-api/types"
+	containertypes "github.com/docker/engine-api/types/container"
 	"github.com/docker/libnetwork"
 	nwconfig "github.com/docker/libnetwork/config"
 	winlibnetwork "github.com/docker/libnetwork/drivers/windows"
@@ -32,14 +35,13 @@ import (
 )
 
 const (
-	defaultVirtualSwitch = "Virtual Switch"
-	defaultNetworkSpace  = "172.16.0.0/12"
-	platformSupported    = true
-	windowsMinCPUShares  = 1
-	windowsMaxCPUShares  = 10000
+	defaultNetworkSpace = "172.16.0.0/12"
+	platformSupported   = true
+	windowsMinCPUShares = 1
+	windowsMaxCPUShares = 10000
 )
 
-func getBlkioWeightDevices(config *containertypes.HostConfig) ([]*blkiodev.WeightDevice, error) {
+func getBlkioWeightDevices(config *containertypes.HostConfig) ([]blkiodev.WeightDevice, error) {
 	return nil, nil
 }
 
@@ -47,19 +49,19 @@ func parseSecurityOpt(container *container.Container, config *containertypes.Hos
 	return nil
 }
 
-func getBlkioReadIOpsDevices(config *containertypes.HostConfig) ([]*blkiodev.ThrottleDevice, error) {
+func getBlkioReadIOpsDevices(config *containertypes.HostConfig) ([]blkiodev.ThrottleDevice, error) {
 	return nil, nil
 }
 
-func getBlkioWriteIOpsDevices(config *containertypes.HostConfig) ([]*blkiodev.ThrottleDevice, error) {
+func getBlkioWriteIOpsDevices(config *containertypes.HostConfig) ([]blkiodev.ThrottleDevice, error) {
 	return nil, nil
 }
 
-func getBlkioReadBpsDevices(config *containertypes.HostConfig) ([]*blkiodev.ThrottleDevice, error) {
+func getBlkioReadBpsDevices(config *containertypes.HostConfig) ([]blkiodev.ThrottleDevice, error) {
 	return nil, nil
 }
 
-func getBlkioWriteBpsDevices(config *containertypes.HostConfig) ([]*blkiodev.ThrottleDevice, error) {
+func getBlkioWriteBpsDevices(config *containertypes.HostConfig) ([]blkiodev.ThrottleDevice, error) {
 	return nil, nil
 }
 
@@ -93,10 +95,34 @@ func (daemon *Daemon) adaptContainerSettings(hostConfig *containertypes.HostConf
 	return nil
 }
 
+func verifyContainerResources(resources *containertypes.Resources, sysInfo *sysinfo.SysInfo) ([]string, error) {
+	warnings := []string{}
+
+	// cpu subsystem checks and adjustments
+	if resources.CPUPercent < 0 || resources.CPUPercent > 100 {
+		return warnings, fmt.Errorf("Range of CPU percent is from 1 to 100")
+	}
+
+	if resources.CPUPercent > 0 && resources.CPUShares > 0 {
+		return warnings, fmt.Errorf("Conflicting options: CPU Shares and CPU Percent cannot both be set")
+	}
+
+	return warnings, nil
+}
+
 // verifyPlatformContainerSettings performs platform-specific validation of the
 // hostconfig and config structures.
 func verifyPlatformContainerSettings(daemon *Daemon, hostConfig *containertypes.HostConfig, config *containertypes.Config, update bool) ([]string, error) {
-	return nil, nil
+
+	warnings := []string{}
+
+	w, err := verifyContainerResources(&hostConfig.Resources, nil)
+	warnings = append(warnings, w...)
+	if err != nil {
+		return warnings, err
+	}
+
+	return warnings, nil
 }
 
 // verifyDaemonSettings performs validation of daemon config struct
@@ -108,15 +134,12 @@ func verifyDaemonSettings(config *Config) error {
 func checkSystem() error {
 	// Validate the OS version. Note that docker.exe must be manifested for this
 	// call to return the correct version.
-	osv, err := system.GetOSVersion()
-	if err != nil {
-		return err
-	}
+	osv := system.GetOSVersion()
 	if osv.MajorVersion < 10 {
 		return fmt.Errorf("This version of Windows does not support the docker daemon")
 	}
-	if osv.Build < 10586 {
-		return fmt.Errorf("The Windows daemon requires Windows Server 2016 Technical Preview 4, build 10586 or later")
+	if osv.Build < 14300 {
+		return fmt.Errorf("The Windows daemon requires Windows Server 2016 Technical Preview 5 build 14300 or later")
 	}
 	return nil
 }
@@ -132,21 +155,6 @@ func configureMaxThreads(config *Config) error {
 }
 
 func (daemon *Daemon) initNetworkController(config *Config) (libnetwork.NetworkController, error) {
-	// TODO Windows: Remove this check once TP4 is no longer supported
-	osv, err := system.GetOSVersion()
-	if err != nil {
-		return nil, err
-	}
-
-	if osv.Build < 14260 {
-		// Set the name of the virtual switch if not specified by -b on daemon start
-		if config.bridgeConfig.Iface == "" {
-			config.bridgeConfig.Iface = defaultVirtualSwitch
-		}
-		logrus.Warnf("Network controller is not supported by the current platform build version")
-		return nil, nil
-	}
-
 	netOptions, err := daemon.networkOptions(config)
 	if err != nil {
 		return nil, err
@@ -287,6 +295,10 @@ func (daemon *Daemon) registerLinks(container *container.Container, hostConfig *
 	return nil
 }
 
+func (daemon *Daemon) cleanupMountsByID(in string) error {
+	return nil
+}
+
 func (daemon *Daemon) cleanupMounts() error {
 	return nil
 }
@@ -304,25 +316,36 @@ func setupDaemonRoot(config *Config, rootDir string, rootUID, rootGID int) error
 	return nil
 }
 
+// runasHyperVContainer returns true if we are going to run as a Hyper-V container
+func (daemon *Daemon) runAsHyperVContainer(container *container.Container) bool {
+	if container.HostConfig.Isolation.IsDefault() {
+		// Container is set to use the default, so take the default from the daemon configuration
+		return daemon.defaultIsolation.IsHyperV()
+	}
+
+	// Container is requesting an isolation mode. Honour it.
+	return container.HostConfig.Isolation.IsHyperV()
+
+}
+
 // conditionalMountOnStart is a platform specific helper function during the
 // container start to call mount.
 func (daemon *Daemon) conditionalMountOnStart(container *container.Container) error {
 	// We do not mount if a Hyper-V container
-	if !container.HostConfig.Isolation.IsHyperV() {
-		if err := daemon.Mount(container); err != nil {
-			return err
-		}
+	if !daemon.runAsHyperVContainer(container) {
+		return daemon.Mount(container)
 	}
 	return nil
 }
 
 // conditionalUnmountOnCleanup is a platform specific helper function called
 // during the cleanup of a container to unmount.
-func (daemon *Daemon) conditionalUnmountOnCleanup(container *container.Container) {
+func (daemon *Daemon) conditionalUnmountOnCleanup(container *container.Container) error {
 	// We do not unmount if a Hyper-V container
-	if !container.HostConfig.Isolation.IsHyperV() {
-		daemon.Unmount(container)
+	if !daemon.runAsHyperVContainer(container) {
+		return daemon.Unmount(container)
 	}
+	return nil
 }
 
 func restoreCustomImage(is image.Store, ls layer.Store, rs reference.Store) error {
@@ -347,8 +370,8 @@ func restoreCustomImage(is image.Store, ls layer.Store, rs reference.Store) erro
 	}
 
 	// Convert imageData to valid image configuration
-	for i := range imageInfos {
-		name := strings.ToLower(imageInfos[i].Name)
+	for _, info := range imageInfos {
+		name := strings.ToLower(info.Name)
 
 		type registrar interface {
 			RegisterDiffID(graphID string, size int64) (layer.Layer, error)
@@ -357,13 +380,12 @@ func restoreCustomImage(is image.Store, ls layer.Store, rs reference.Store) erro
 		if !ok {
 			return errors.New("Layerstore doesn't support RegisterDiffID")
 		}
-		if _, err := r.RegisterDiffID(imageInfos[i].ID, imageInfos[i].Size); err != nil {
+		if _, err := r.RegisterDiffID(info.ID, info.Size); err != nil {
 			return err
 		}
 		// layer is intentionally not released
 
-		rootFS := image.NewRootFS()
-		rootFS.BaseLayer = filepath.Base(imageInfos[i].Path)
+		rootFS := image.NewRootFSWithBaseLayer(filepath.Base(info.Path))
 
 		// Create history for base layer
 		config, err := json.Marshal(&image.Image{
@@ -371,10 +393,12 @@ func restoreCustomImage(is image.Store, ls layer.Store, rs reference.Store) erro
 				DockerVersion: dockerversion.Version,
 				Architecture:  runtime.GOARCH,
 				OS:            runtime.GOOS,
-				Created:       imageInfos[i].CreatedTime,
+				Created:       info.CreatedTime,
 			},
-			RootFS:  rootFS,
-			History: []image.History{},
+			RootFS:     rootFS,
+			History:    []image.History{},
+			OSVersion:  info.OSVersion,
+			OSFeatures: info.OSFeatures,
 		})
 
 		named, err := reference.ParseNamed(name)
@@ -382,14 +406,16 @@ func restoreCustomImage(is image.Store, ls layer.Store, rs reference.Store) erro
 			return err
 		}
 
-		ref, err := reference.WithTag(named, imageInfos[i].Version)
+		ref, err := reference.WithTag(named, info.Version)
 		if err != nil {
 			return err
 		}
 
 		id, err := is.Create(config)
 		if err != nil {
-			return err
+			logrus.Warnf("Failed to restore custom image %s with error: %s.", name, err)
+			logrus.Warnf("Skipping image %s...", name)
+			continue
 		}
 
 		if err := rs.AddTag(ref, id, true); err != nil {
@@ -403,4 +429,48 @@ func restoreCustomImage(is image.Store, ls layer.Store, rs reference.Store) erro
 
 func driverOptions(config *Config) []nwconfig.Option {
 	return []nwconfig.Option{}
+}
+
+func (daemon *Daemon) stats(c *container.Container) (*types.StatsJSON, error) {
+	return nil, nil
+}
+
+// setDefaultIsolation determine the default isolation mode for the
+// daemon to run in. This is only applicable on Windows
+func (daemon *Daemon) setDefaultIsolation() error {
+	daemon.defaultIsolation = containertypes.Isolation("process")
+	for _, option := range daemon.configStore.ExecOptions {
+		key, val, err := parsers.ParseKeyValueOpt(option)
+		if err != nil {
+			return err
+		}
+		key = strings.ToLower(key)
+		switch key {
+
+		case "isolation":
+			if !containertypes.Isolation(val).IsValid() {
+				return fmt.Errorf("Invalid exec-opt value for 'isolation':'%s'", val)
+			}
+			if containertypes.Isolation(val).IsHyperV() {
+				daemon.defaultIsolation = containertypes.Isolation("hyperv")
+			}
+		default:
+			return fmt.Errorf("Unrecognised exec-opt '%s'\n", key)
+		}
+	}
+
+	logrus.Infof("Windows default isolation mode: %s", daemon.defaultIsolation)
+	return nil
+}
+
+func rootFSToAPIType(rootfs *image.RootFS) types.RootFS {
+	var layers []string
+	for _, l := range rootfs.DiffIDs {
+		layers = append(layers, l.String())
+	}
+	return types.RootFS{
+		Type:      rootfs.Type,
+		Layers:    layers,
+		BaseLayer: rootfs.BaseLayer,
+	}
 }

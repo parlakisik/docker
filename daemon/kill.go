@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -27,7 +28,7 @@ func isErrNoSuchProcess(err error) bool {
 	return ok
 }
 
-// ContainerKill send signal to the container
+// ContainerKill sends signal to the container
 // If no signal is given (sig 0), then Kill with SIGKILL and wait
 // for the container to exit.
 // If a signal is given, then just send it to the container and return.
@@ -69,6 +70,10 @@ func (daemon *Daemon) killWithSignal(container *container.Container, sig int) er
 
 	container.ExitOnNext()
 
+	if !daemon.IsShuttingDown() {
+		container.HasBeenManuallyStopped = true
+	}
+
 	// if the container is currently restarting we do not need to send the signal
 	// to the process.  Telling the monitor that it should exit on it's next event
 	// loop is enough
@@ -77,7 +82,14 @@ func (daemon *Daemon) killWithSignal(container *container.Container, sig int) er
 	}
 
 	if err := daemon.kill(container, sig); err != nil {
-		return fmt.Errorf("Cannot kill container %s: %s", container.ID, err)
+		err = fmt.Errorf("Cannot kill container %s: %s", container.ID, err)
+		// if container or process not exists, ignore the error
+		if strings.Contains(err.Error(), "container not found") ||
+			strings.Contains(err.Error(), "no such process") {
+			logrus.Warnf("%s", err.Error())
+		} else {
+			return err
+		}
 	}
 
 	attributes := map[string]string{
@@ -99,7 +111,7 @@ func (daemon *Daemon) Kill(container *container.Container) error {
 		// because if we can't stop the container by this point then
 		// its probably because its already stopped. Meaning, between
 		// the time of the IsRunning() call above and now it stopped.
-		// Also, since the err return will be exec driver specific we can't
+		// Also, since the err return will be environment specific we can't
 		// look for any particular (common) error that would indicate
 		// that the process is already dead vs something else going wrong.
 		// So, instead we'll give it up to 2 more seconds to complete and if

@@ -3,7 +3,6 @@ package daemon
 import (
 	"os"
 	"runtime"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -68,6 +67,17 @@ func (daemon *Daemon) SystemInfo() (*types.Info, error) {
 		}
 	})
 
+	var securityOptions []string
+	if sysInfo.AppArmor {
+		securityOptions = append(securityOptions, "apparmor")
+	}
+	if sysInfo.Seccomp {
+		securityOptions = append(securityOptions, "seccomp")
+	}
+	if selinuxEnabled() {
+		securityOptions = append(securityOptions, "selinux")
+	}
+
 	v := &types.Info{
 		ID:                 daemon.ID,
 		Containers:         int(cRunning + cPaused + cStopped),
@@ -85,7 +95,6 @@ func (daemon *Daemon) SystemInfo() (*types.Info, error) {
 		NFd:                fileutils.GetTotalUsedFds(),
 		NGoroutines:        runtime.NumGoroutine(),
 		SystemTime:         time.Now().Format(time.RFC3339Nano),
-		ExecutionDriver:    daemon.ExecutionDriver().Name(),
 		LoggingDriver:      daemon.defaultLogConfig.Type,
 		CgroupDriver:       daemon.getCgroupDriver(),
 		NEventsListener:    daemon.EventsService.SubscribersCount(),
@@ -106,6 +115,7 @@ func (daemon *Daemon) SystemInfo() (*types.Info, error) {
 		HTTPProxy:          sockets.GetProxyEnv("http_proxy"),
 		HTTPSProxy:         sockets.GetProxyEnv("https_proxy"),
 		NoProxy:            sockets.GetProxyEnv("no_proxy"),
+		SecurityOptions:    securityOptions,
 	}
 
 	// TODO Windows. Refactor this more once sysinfo is refactored into
@@ -142,9 +152,13 @@ func (daemon *Daemon) SystemVersion() types.Version {
 		Experimental: utils.ExperimentalBuild(),
 	}
 
-	if kernelVersion, err := kernel.GetKernelVersion(); err == nil {
-		v.KernelVersion = kernelVersion.String()
+	kernelVersion := "<unknown>"
+	if kv, err := kernel.GetKernelVersion(); err != nil {
+		logrus.Warnf("Could not get kernel version: %v", err)
+	} else {
+		kernelVersion = kv.String()
 	}
+	v.KernelVersion = kernelVersion
 
 	return v
 }
@@ -162,14 +176,4 @@ func (daemon *Daemon) showPluginsInfo() types.PluginsInfo {
 	pluginsInfo.Authorization = daemon.configStore.AuthorizationPlugins
 
 	return pluginsInfo
-}
-
-// The uppercase and the lowercase are available for the proxy settings.
-// See the Go specification for details on these variables. https://golang.org/pkg/net/http/
-func getProxyEnv(key string) string {
-	proxyValue := os.Getenv(strings.ToUpper(key))
-	if proxyValue == "" {
-		return os.Getenv(strings.ToLower(key))
-	}
-	return proxyValue
 }

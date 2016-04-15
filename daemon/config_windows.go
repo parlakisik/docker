@@ -9,15 +9,12 @@ import (
 var (
 	defaultPidFile = os.Getenv("programdata") + string(os.PathSeparator) + "docker.pid"
 	defaultGraph   = os.Getenv("programdata") + string(os.PathSeparator) + "docker"
-	defaultExec    = "windows"
 )
 
 // bridgeConfig stores all the bridge driver specific
 // configuration.
 type bridgeConfig struct {
-	FixedCIDR   string
-	NetworkMode string
-	Iface       string `json:"bridge,omitempty"`
+	commonBridgeConfig
 }
 
 // Config defines the configuration of a docker daemon.

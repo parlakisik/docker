@@ -154,14 +154,9 @@ Create a container
                    "com.example.license": "GPL",
                    "com.example.version": "1.0"
            },
-           "Mounts": [
-             {
-               "Source": "/data",
-               "Destination": "/data",
-               "Mode": "ro,Z",
-               "RW": false
-             }
-           ],
+           "Volumes": {
+             "/volumes/data": {}
+           },
            "WorkingDir": "",
            "NetworkDisabled": false,
            "MacAddress": "12:34:56:78:9a:bc",
@@ -198,7 +193,7 @@ Create a container
              "Devices": [],
              "Ulimits": [{}],
              "LogConfig": { "Type": "json-file", "Config": {} },
-             "SecurityOpt": [""],
+             "SecurityOpt": [],
              "CgroupParent": ""
           }
       }
@@ -245,7 +240,8 @@ Json Parameters:
 -   **Entrypoint** - Set the entry point for the container as a string or an array
       of strings.
 -   **Image** - A string specifying the image name to use for the container.
--   **Mounts** - An array of mount points in the container.
+-   **Volumes** - An object mapping mount point paths (strings) inside the
+      container to empty objects.
 -   **WorkingDir** - A string specifying the working directory for commands to
       run in.
 -   **NetworkDisabled** - Boolean value, when true disables networking for the
@@ -1622,7 +1618,7 @@ Tag the image `name` into a repository
 
 **Example response**:
 
-    HTTP/1.1 201 OK
+    HTTP/1.1 201 Created
 
 Query Parameters:
 
@@ -2116,7 +2112,7 @@ Sets up an exec instance in a running container `id`
 
 **Example response**:
 
-    HTTP/1.1 201 OK
+    HTTP/1.1 201 Created
     Content-Type: application/json
 
     {
@@ -2158,8 +2154,8 @@ interactive session with the `exec` command.
 
 **Example response**:
 
-    HTTP/1.1 201 OK
-    Content-Type: application/json
+    HTTP/1.1 200 OK
+    Content-Type: application/vnd.docker.raw-stream
 
     {{ STREAM }}
 
@@ -2190,7 +2186,7 @@ This API is valid only if `tty` was specified as part of creating and starting t
 
 **Example response**:
 
-    HTTP/1.1 201 OK
+    HTTP/1.1 201 Created
     Content-Type: text/plain
 
 Query Parameters:

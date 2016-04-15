@@ -158,14 +158,9 @@ Create a container
                    "com.example.license": "GPL",
                    "com.example.version": "1.0"
            },
-           "Mounts": [
-             {
-               "Source": "/data",
-               "Destination": "/data",
-               "Mode": "ro,Z",
-               "RW": false
-             }
-           ],
+           "Volumes": {
+             "/volumes/data": {}
+           },
            "WorkingDir": "",
            "NetworkDisabled": false,
            "MacAddress": "12:34:56:78:9a:bc",
@@ -204,9 +199,10 @@ Create a container
              "RestartPolicy": { "Name": "", "MaximumRetryCount": 0 },
              "NetworkMode": "bridge",
              "Devices": [],
+             "Sysctls": { "net.ipv4.ip_forward": "1" },
              "Ulimits": [{}],
              "LogConfig": { "Type": "json-file", "Config": {} },
-             "SecurityOpt": [""],
+             "SecurityOpt": [],
              "CgroupParent": "",
              "VolumeDriver": ""
           }
@@ -256,7 +252,8 @@ Json Parameters:
 -   **Entrypoint** - Set the entry point for the container as a string or an array
       of strings.
 -   **Image** - A string specifying the image name to use for the container.
--   **Mounts** - An array of mount points in the container.
+-   **Volumes** - An object mapping mount point paths (strings) inside the
+      container to empty objects.
 -   **WorkingDir** - A string specifying the working directory for commands to
       run in.
 -   **NetworkDisabled** - Boolean value, when true disables networking for the
@@ -310,6 +307,10 @@ Json Parameters:
     -   **Devices** - A list of devices to add to the container specified as a JSON object in the
       form
           `{ "PathOnHost": "/dev/deviceName", "PathInContainer": "/dev/deviceName", "CgroupPermissions": "mrw"}`
+    -   **Sysctls** - A list of kernel parameters (sysctls) to set in the container, specified as
+          `{ <name>: <Value> }`, for example:
+	  `{ "net.ipv4.ip_forward": "1" }`
+
     -   **Ulimits** - A list of ulimits to set in the container, specified as
           `{ "Name": <name>, "Soft": <soft limit>, "Hard": <hard limit> }`, for example:
           `Ulimits: { "Name": "nofile", "Soft": 1024, "Hard": 2048 }`
@@ -430,6 +431,9 @@ Return low-level information on the container `id`
 				"Type": "json-file"
 			},
 			"SecurityOpt": null,
+			"Sysctls": {
+			        "net.ipv4.ip_forward": "1"
+			},
 			"VolumesFrom": null,
 			"Ulimits": [{}],
 			"VolumeDriver": ""
@@ -1773,7 +1777,7 @@ Tag the image `name` into a repository
 
 **Example response**:
 
-    HTTP/1.1 201 OK
+    HTTP/1.1 201 Created
 
 Query Parameters:
 
@@ -1921,11 +1925,11 @@ Display system-wide information
     Content-Type: application/json
 
     {
+        "ClusterStore": "etcd://localhost:2379",
         "Containers": 11,
         "CpuCfsPeriod": true,
         "CpuCfsQuota": true,
         "Debug": false,
-        "DiscoveryBackend": "etcd://localhost:2379",
         "DockerRootDir": "/var/lib/docker",
         "Driver": "btrfs",
         "DriverStatus": [[""]],
@@ -1966,9 +1970,9 @@ Display system-wide information
                 "127.0.0.0/8"
             ]
         },
+        "ServerVersion": "1.9.0",
         "SwapLimit": false,
         "SystemTime": "2015-03-10T11:11:23.730591467-07:00"
-        "ServerVersion": "1.9.0"
     }
 
 Status Codes:
@@ -2270,7 +2274,7 @@ Sets up an exec instance in a running container `id`
 
 **Example response**:
 
-    HTTP/1.1 201 OK
+    HTTP/1.1 201 Created
     Content-Type: application/json
 
     {
@@ -2314,8 +2318,8 @@ interactive session with the `exec` command.
 
 **Example response**:
 
-    HTTP/1.1 201 OK
-    Content-Type: application/json
+    HTTP/1.1 200 OK
+    Content-Type: application/vnd.docker.raw-stream
 
     {{ STREAM }}
 
@@ -2347,7 +2351,7 @@ This API is valid only if `tty` was specified as part of creating and starting t
 
 **Example response**:
 
-    HTTP/1.1 201 OK
+    HTTP/1.1 201 Created
     Content-Type: text/plain
 
 Query Parameters:
@@ -2796,7 +2800,7 @@ JSON Parameters:
 
 `POST /networks/(id)/connect`
 
-Connects a container to a network
+Connect a container to a network
 
 **Example request**:
 
@@ -2827,7 +2831,7 @@ JSON Parameters:
 
 `POST /networks/(id)/disconnect`
 
-Disconnects a container from a network
+Disconnect a container from a network
 
 **Example request**:
 

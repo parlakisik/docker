@@ -20,13 +20,12 @@ import (
 	"time"
 
 	"github.com/Sirupsen/logrus"
+	containerd "github.com/docker/containerd/api/grpc/types"
 	"github.com/docker/docker/api"
 	"github.com/docker/docker/builder"
 	"github.com/docker/docker/container"
 	"github.com/docker/docker/daemon/events"
 	"github.com/docker/docker/daemon/exec"
-	"github.com/docker/docker/daemon/execdriver"
-	"github.com/docker/docker/daemon/execdriver/execdrivers"
 	"github.com/docker/docker/errors"
 	"github.com/docker/engine-api/types"
 	containertypes "github.com/docker/engine-api/types/container"
@@ -39,19 +38,18 @@ import (
 	_ "github.com/docker/docker/daemon/graphdriver/register"
 	"github.com/docker/docker/daemon/logger"
 	"github.com/docker/docker/daemon/network"
-	"github.com/docker/docker/distribution"
 	dmetadata "github.com/docker/docker/distribution/metadata"
 	"github.com/docker/docker/distribution/xfer"
 	"github.com/docker/docker/dockerversion"
 	"github.com/docker/docker/image"
 	"github.com/docker/docker/image/tarexport"
 	"github.com/docker/docker/layer"
+	"github.com/docker/docker/libcontainerd"
 	"github.com/docker/docker/migrate/v1"
 	"github.com/docker/docker/pkg/archive"
 	"github.com/docker/docker/pkg/fileutils"
 	"github.com/docker/docker/pkg/graphdb"
 	"github.com/docker/docker/pkg/idtools"
-	"github.com/docker/docker/pkg/mount"
 	"github.com/docker/docker/pkg/namesgenerator"
 	"github.com/docker/docker/pkg/progress"
 	"github.com/docker/docker/pkg/registrar"
@@ -71,9 +69,7 @@ import (
 	"github.com/docker/go-connections/nat"
 	"github.com/docker/libnetwork"
 	nwconfig "github.com/docker/libnetwork/config"
-	lntypes "github.com/docker/libnetwork/types"
 	"github.com/docker/libtrust"
-	"github.com/opencontainers/runc/libcontainer"
 	"golang.org/x/net/context"
 )
 
@@ -115,7 +111,6 @@ type Daemon struct {
 	trustKey                  libtrust.PrivateKey
 	idIndex                   *truncindex.TruncIndex
 	configStore               *Config
-	execDriver                execdriver.Driver
 	statsCollector            *statsCollector
 	defaultLogConfig          containertypes.LogConfig
 	RegistryService           *registry.Service
@@ -132,6 +127,8 @@ type Daemon struct {
 	imageStore                image.Store
 	nameIndex                 *registrar.Registrar
 	linkIndex                 *linkIndex
+	containerd                libcontainerd.Client
+	defaultIsolation          containertypes.Isolation // Default isolation mode on Windows
 }
 
 // GetContainer looks for a container using the provided information, which could be
@@ -220,36 +217,16 @@ func (daemon *Daemon) registerName(container *container.Container) error {
 }
 
 // Register makes a container object usable by the daemon as <container.ID>
-func (daemon *Daemon) Register(container *container.Container) error {
+func (daemon *Daemon) Register(c *container.Container) error {
 	// Attach to stdout and stderr
-	if container.Config.OpenStdin {
-		container.NewInputPipes()
+	if c.Config.OpenStdin {
+		c.NewInputPipes()
 	} else {
-		container.NewNopInputPipe()
+		c.NewNopInputPipe()
 	}
 
-	daemon.containers.Add(container.ID, container)
-	daemon.idIndex.Add(container.ID)
-
-	if container.IsRunning() {
-		logrus.Debugf("killing old running container %s", container.ID)
-		// Set exit code to 128 + SIGKILL (9) to properly represent unsuccessful exit
-		container.SetStoppedLocking(&execdriver.ExitStatus{ExitCode: 137})
-		// use the current driver and ensure that the container is dead x.x
-		cmd := &execdriver.Command{
-			CommonCommand: execdriver.CommonCommand{
-				ID: container.ID,
-			},
-		}
-		daemon.execDriver.Terminate(cmd)
-
-		container.UnmountIpcMounts(mount.Unmount)
-
-		daemon.Unmount(container)
-		if err := container.ToDiskLocking(); err != nil {
-			logrus.Errorf("Error saving stopped state to disk: %v", err)
-		}
-	}
+	daemon.containers.Add(c.ID, c)
+	daemon.idIndex.Add(c.ID)
 
 	return nil
 }
@@ -307,17 +284,40 @@ func (daemon *Daemon) restore() error {
 			logrus.Errorf("Failed to register container %s: %s", c.ID, err)
 			continue
 		}
-
-		// get list of containers we need to restart
-		if daemon.configStore.AutoRestart && c.ShouldRestart() {
-			restartContainers[c] = make(chan struct{})
-		}
-
-		// if c.hostConfig.Links is nil (not just empty), then it is using the old sqlite links and needs to be migrated
-		if c.HostConfig != nil && c.HostConfig.Links == nil {
-			migrateLegacyLinks = true
-		}
 	}
+	var wg sync.WaitGroup
+	var mapLock sync.Mutex
+	for _, c := range containers {
+		wg.Add(1)
+		go func(c *container.Container) {
+			defer wg.Done()
+			rm := c.RestartManager(false)
+			if c.IsRunning() || c.IsPaused() {
+				// Fix activityCount such that graph mounts can be unmounted later
+				if err := daemon.layerStore.ReinitRWLayer(c.RWLayer); err != nil {
+					logrus.Errorf("Failed to ReinitRWLayer for %s due to %s", c.ID, err)
+					return
+				}
+				if err := daemon.containerd.Restore(c.ID, libcontainerd.WithRestartManager(rm)); err != nil {
+					logrus.Errorf("Failed to restore with containerd: %q", err)
+					return
+				}
+			}
+			// fixme: only if not running
+			// get list of containers we need to restart
+			if daemon.configStore.AutoRestart && !c.IsRunning() && !c.IsPaused() && c.ShouldRestart() {
+				mapLock.Lock()
+				restartContainers[c] = make(chan struct{})
+				mapLock.Unlock()
+			}
+
+			// if c.hostConfig.Links is nil (not just empty), then it is using the old sqlite links and needs to be migrated
+			if c.HostConfig != nil && c.HostConfig.Links == nil {
+				migrateLegacyLinks = true
+			}
+		}(c)
+	}
+	wg.Wait()
 
 	// migrate any legacy links from sqlite
 	linkdbFile := filepath.Join(daemon.root, "linkgraph.db")
@@ -599,7 +599,7 @@ func (daemon *Daemon) registerLink(parent, child *container.Container, alias str
 
 // NewDaemon sets up everything for the daemon to be able to service
 // requests from the webserver.
-func NewDaemon(config *Config, registryService *registry.Service) (daemon *Daemon, err error) {
+func NewDaemon(config *Config, registryService *registry.Service, containerdRemote libcontainerd.Remote) (daemon *Daemon, err error) {
 	setDefaultMtu(config)
 
 	// Ensure we have compatible and valid configuration options
@@ -659,7 +659,7 @@ func NewDaemon(config *Config, registryService *registry.Service) (daemon *Daemo
 	}
 	os.Setenv("TMPDIR", realTmp)
 
-	d := &Daemon{}
+	d := &Daemon{configStore: config}
 	// Ensure the daemon is properly shutdown if there is a failure during
 	// initialization
 	defer func() {
@@ -669,6 +669,11 @@ func NewDaemon(config *Config, registryService *registry.Service) (daemon *Daemo
 			}
 		}
 	}()
+
+	// Set the default isolation mode (only applicable on Windows)
+	if err := d.setDefaultIsolation(); err != nil {
+		return nil, fmt.Errorf("error setting default isolation mode: %v", err)
+	}
 
 	// Verify logging driver type
 	if config.LogConfig.Type != "none" {
@@ -682,6 +687,7 @@ func NewDaemon(config *Config, registryService *registry.Service) (daemon *Daemo
 		logrus.Warnf("Failed to configure golang's threads limit: %v", err)
 	}
 
+	installDefaultAppArmorProfile()
 	daemonRepo := filepath.Join(config.Root, "containers")
 	if err := idtools.MkdirAllAs(daemonRepo, 0700, rootUID, rootGID); err != nil && !os.IsExist(err) {
 		return nil, err
@@ -781,11 +787,6 @@ func NewDaemon(config *Config, registryService *registry.Service) (daemon *Daemo
 		return nil, fmt.Errorf("Devices cgroup isn't mounted")
 	}
 
-	ed, err := execdrivers.NewDriver(config.ExecOptions, config.ExecRoot, config.Root, sysInfo)
-	if err != nil {
-		return nil, err
-	}
-
 	d.ID = trustKey.PublicKey().KeyID()
 	d.repository = daemonRepo
 	d.containers = container.NewMemoryStore()
@@ -794,8 +795,6 @@ func NewDaemon(config *Config, registryService *registry.Service) (daemon *Daemo
 	d.distributionMetadataStore = distributionMetadataStore
 	d.trustKey = trustKey
 	d.idIndex = truncindex.NewTruncIndex([]string{})
-	d.configStore = config
-	d.execDriver = ed
 	d.statsCollector = d.newStatsCollector(1 * time.Second)
 	d.defaultLogConfig = containertypes.LogConfig{
 		Type:   config.LogConfig.Type,
@@ -812,10 +811,12 @@ func NewDaemon(config *Config, registryService *registry.Service) (daemon *Daemo
 	d.nameIndex = registrar.NewRegistrar()
 	d.linkIndex = newLinkIndex()
 
-	if err := d.cleanupMounts(); err != nil {
+	go d.execCommandGC()
+
+	d.containerd, err = containerdRemote.Client(d)
+	if err != nil {
 		return nil, err
 	}
-	go d.execCommandGC()
 
 	if err := d.restore(); err != nil {
 		return nil, err
@@ -877,6 +878,9 @@ func (daemon *Daemon) Shutdown() error {
 				logrus.Errorf("Stop container error: %v", err)
 				return
 			}
+			if mountid, err := daemon.layerStore.GetMountID(c.ID); err == nil {
+				daemon.cleanupMountsByID(mountid)
+			}
 			logrus.Debugf("container stopped %s", c.ID)
 		})
 	}
@@ -923,29 +927,16 @@ func (daemon *Daemon) Mount(container *container.Container) error {
 }
 
 // Unmount unsets the container base filesystem
-func (daemon *Daemon) Unmount(container *container.Container) {
+func (daemon *Daemon) Unmount(container *container.Container) error {
 	if err := container.RWLayer.Unmount(); err != nil {
 		logrus.Errorf("Error unmounting container %s: %s", container.ID, err)
+		return err
 	}
-}
-
-// Run uses the execution driver to run a given container
-func (daemon *Daemon) Run(c *container.Container, pipes *execdriver.Pipes, startCallback execdriver.DriverCallback) (execdriver.ExitStatus, error) {
-	hooks := execdriver.Hooks{
-		Start: startCallback,
-	}
-	hooks.PreStart = append(hooks.PreStart, func(processConfig *execdriver.ProcessConfig, pid int, chOOM <-chan struct{}) error {
-		return daemon.setNetworkNamespaceKey(c.ID, pid)
-	})
-	return daemon.execDriver.Run(c.Command, pipes, hooks)
+	return nil
 }
 
 func (daemon *Daemon) kill(c *container.Container, sig int) error {
-	return daemon.execDriver.Kill(c.Command, sig)
-}
-
-func (daemon *Daemon) stats(c *container.Container) (*execdriver.ResourceStats, error) {
-	return daemon.execDriver.Stats(c.ID)
+	return daemon.containerd.Signal(c.ID, sig)
 }
 
 func (daemon *Daemon) subscribeToContainerStats(c *container.Container) chan interface{} {
@@ -958,21 +949,6 @@ func (daemon *Daemon) unsubscribeToContainerStats(c *container.Container, ch cha
 
 func (daemon *Daemon) changes(container *container.Container) ([]archive.Change, error) {
 	return container.RWLayer.Changes()
-}
-
-// TagImage creates the tag specified by newTag, pointing to the image named
-// imageName (alternatively, imageName can also be an image ID).
-func (daemon *Daemon) TagImage(newTag reference.Named, imageName string) error {
-	imageID, err := daemon.GetImageID(imageName)
-	if err != nil {
-		return err
-	}
-	if err := daemon.referenceStore.AddTag(newTag, imageID, true); err != nil {
-		return err
-	}
-
-	daemon.LogImageEvent(imageID.String(), newTag.String(), "tag")
-	return nil
 }
 
 func writeDistributionProgress(cancelFunc func(), outStream io.Writer, progressChan <-chan progress.Progress) {
@@ -1005,69 +981,6 @@ func isBrokenPipe(e error) bool {
 	return e == syscall.EPIPE
 }
 
-// PullImage initiates a pull operation. image is the repository name to pull, and
-// tag may be either empty, or indicate a specific tag to pull.
-func (daemon *Daemon) PullImage(ref reference.Named, metaHeaders map[string][]string, authConfig *types.AuthConfig, outStream io.Writer) error {
-	// Include a buffer so that slow client connections don't affect
-	// transfer performance.
-	progressChan := make(chan progress.Progress, 100)
-
-	writesDone := make(chan struct{})
-
-	ctx, cancelFunc := context.WithCancel(context.Background())
-
-	go func() {
-		writeDistributionProgress(cancelFunc, outStream, progressChan)
-		close(writesDone)
-	}()
-
-	imagePullConfig := &distribution.ImagePullConfig{
-		MetaHeaders:      metaHeaders,
-		AuthConfig:       authConfig,
-		ProgressOutput:   progress.ChanOutput(progressChan),
-		RegistryService:  daemon.RegistryService,
-		ImageEventLogger: daemon.LogImageEvent,
-		MetadataStore:    daemon.distributionMetadataStore,
-		ImageStore:       daemon.imageStore,
-		ReferenceStore:   daemon.referenceStore,
-		DownloadManager:  daemon.downloadManager,
-	}
-
-	err := distribution.Pull(ctx, ref, imagePullConfig)
-	close(progressChan)
-	<-writesDone
-	return err
-}
-
-// PullOnBuild tells Docker to pull image referenced by `name`.
-func (daemon *Daemon) PullOnBuild(name string, authConfigs map[string]types.AuthConfig, output io.Writer) (builder.Image, error) {
-	ref, err := reference.ParseNamed(name)
-	if err != nil {
-		return nil, err
-	}
-	ref = reference.WithDefaultTag(ref)
-
-	pullRegistryAuth := &types.AuthConfig{}
-	if len(authConfigs) > 0 {
-		// The request came with a full auth config file, we prefer to use that
-		repoInfo, err := daemon.RegistryService.ResolveRepository(ref)
-		if err != nil {
-			return nil, err
-		}
-
-		resolvedConfig := registry.ResolveAuthConfig(
-			authConfigs,
-			repoInfo.Index,
-		)
-		pullRegistryAuth = &resolvedConfig
-	}
-
-	if err := daemon.PullImage(ref, nil, pullRegistryAuth, output); err != nil {
-		return nil, err
-	}
-	return daemon.GetImage(name)
-}
-
 // ExportImage exports a list of images to the given output stream. The
 // exported images are archived into a tar when written to the output
 // stream. All images with the given tag and all versions containing
@@ -1076,41 +989,6 @@ func (daemon *Daemon) PullOnBuild(name string, authConfigs map[string]types.Auth
 func (daemon *Daemon) ExportImage(names []string, outStream io.Writer) error {
 	imageExporter := tarexport.NewTarExporter(daemon.imageStore, daemon.layerStore, daemon.referenceStore)
 	return imageExporter.Save(names, outStream)
-}
-
-// PushImage initiates a push operation on the repository named localName.
-func (daemon *Daemon) PushImage(ref reference.Named, metaHeaders map[string][]string, authConfig *types.AuthConfig, outStream io.Writer) error {
-	// Include a buffer so that slow client connections don't affect
-	// transfer performance.
-	progressChan := make(chan progress.Progress, 100)
-
-	writesDone := make(chan struct{})
-
-	ctx, cancelFunc := context.WithCancel(context.Background())
-
-	go func() {
-		writeDistributionProgress(cancelFunc, outStream, progressChan)
-		close(writesDone)
-	}()
-
-	imagePushConfig := &distribution.ImagePushConfig{
-		MetaHeaders:      metaHeaders,
-		AuthConfig:       authConfig,
-		ProgressOutput:   progress.ChanOutput(progressChan),
-		RegistryService:  daemon.RegistryService,
-		ImageEventLogger: daemon.LogImageEvent,
-		MetadataStore:    daemon.distributionMetadataStore,
-		LayerStore:       daemon.layerStore,
-		ImageStore:       daemon.imageStore,
-		ReferenceStore:   daemon.referenceStore,
-		TrustKey:         daemon.trustKey,
-		UploadManager:    daemon.uploadManager,
-	}
-
-	err := distribution.Push(ctx, ref, imagePushConfig)
-	close(progressChan)
-	<-writesDone
-	return err
 }
 
 // LookupImage looks up an image by name and returns it as an ImageInspect
@@ -1174,6 +1052,7 @@ func (daemon *Daemon) LookupImage(name string) (*types.ImageInspect, error) {
 		Os:              img.OS,
 		Size:            size,
 		VirtualSize:     size, // TODO: field unused, deprecate
+		RootFS:          rootFSToAPIType(img.RootFS),
 	}
 
 	imageInspect.GraphDriver.Name = daemon.GraphDriverName()
@@ -1322,12 +1201,6 @@ func (daemon *Daemon) GraphDriverName() string {
 	return daemon.layerStore.DriverName()
 }
 
-// ExecutionDriver returns the currently used driver for creating and
-// starting execs in a container.
-func (daemon *Daemon) ExecutionDriver() execdriver.Driver {
-	return daemon.execDriver
-}
-
 // GetUIDGIDMaps returns the current daemon's user namespace settings
 // for the full uid and gid maps which will be applied to containers
 // started in this instance.
@@ -1456,7 +1329,7 @@ func (daemon *Daemon) verifyContainerSettings(hostConfig *containertypes.HostCon
 		if config.WorkingDir != "" {
 			config.WorkingDir = filepath.FromSlash(config.WorkingDir) // Ensure in platform semantics
 			if !system.IsAbs(config.WorkingDir) {
-				return nil, fmt.Errorf("The working directory '%s' is invalid. It needs to be an absolute path.", config.WorkingDir)
+				return nil, fmt.Errorf("The working directory '%s' is invalid. It needs to be an absolute path", config.WorkingDir)
 			}
 		}
 
@@ -1514,20 +1387,20 @@ func configureVolumes(config *Config, rootUID, rootGID int) (*store.VolumeStore,
 	}
 
 	volumedrivers.Register(volumesDriver, volumesDriver.Name())
-	return store.New(), nil
+	return store.New(config.Root)
 }
 
 // AuthenticateToRegistry checks the validity of credentials in authConfig
-func (daemon *Daemon) AuthenticateToRegistry(authConfig *types.AuthConfig) (string, string, error) {
-	return daemon.RegistryService.Auth(authConfig, dockerversion.DockerUserAgent())
+func (daemon *Daemon) AuthenticateToRegistry(ctx context.Context, authConfig *types.AuthConfig) (string, string, error) {
+	return daemon.RegistryService.Auth(authConfig, dockerversion.DockerUserAgent(ctx))
 }
 
 // SearchRegistryForImages queries the registry for images matching
 // term. authConfig is used to login.
-func (daemon *Daemon) SearchRegistryForImages(term string,
+func (daemon *Daemon) SearchRegistryForImages(ctx context.Context, term string,
 	authConfig *types.AuthConfig,
 	headers map[string][]string) (*registrytypes.SearchResults, error) {
-	return daemon.RegistryService.Search(term, authConfig, dockerversion.DockerUserAgent(), headers)
+	return daemon.RegistryService.Search(term, authConfig, dockerversion.DockerUserAgent(ctx), headers)
 }
 
 // IsShuttingDown tells whether the daemon is shutting down or not
@@ -1536,41 +1409,65 @@ func (daemon *Daemon) IsShuttingDown() bool {
 }
 
 // GetContainerStats collects all the stats published by a container
-func (daemon *Daemon) GetContainerStats(container *container.Container) (*execdriver.ResourceStats, error) {
+func (daemon *Daemon) GetContainerStats(container *container.Container) (*types.StatsJSON, error) {
 	stats, err := daemon.stats(container)
 	if err != nil {
 		return nil, err
 	}
 
-	// Retrieve the nw statistics from libnetwork and inject them in the Stats
-	var nwStats []*libcontainer.NetworkInterface
-	if nwStats, err = daemon.getNetworkStats(container); err != nil {
+	if stats.Networks, err = daemon.getNetworkStats(container); err != nil {
 		return nil, err
 	}
-	stats.Interfaces = nwStats
 
 	return stats, nil
 }
 
-func (daemon *Daemon) getNetworkStats(c *container.Container) ([]*libcontainer.NetworkInterface, error) {
-	var list []*libcontainer.NetworkInterface
+// Resolve Network SandboxID in case the container reuse another container's network stack
+func (daemon *Daemon) getNetworkSandboxID(c *container.Container) (string, error) {
+	curr := c
+	for curr.HostConfig.NetworkMode.IsContainer() {
+		containerID := curr.HostConfig.NetworkMode.ConnectedContainer()
+		connected, err := daemon.GetContainer(containerID)
+		if err != nil {
+			return "", fmt.Errorf("Could not get container for %s", containerID)
+		}
+		curr = connected
+	}
+	return curr.NetworkSettings.SandboxID, nil
+}
 
-	sb, err := daemon.netController.SandboxByID(c.NetworkSettings.SandboxID)
+func (daemon *Daemon) getNetworkStats(c *container.Container) (map[string]types.NetworkStats, error) {
+	sandboxID, err := daemon.getNetworkSandboxID(c)
 	if err != nil {
-		return list, err
+		return nil, err
 	}
 
-	stats, err := sb.Statistics()
+	sb, err := daemon.netController.SandboxByID(sandboxID)
 	if err != nil {
-		return list, err
+		return nil, err
 	}
 
-	// Convert libnetwork nw stats into libcontainer nw stats
-	for ifName, ifStats := range stats {
-		list = append(list, convertLnNetworkStats(ifName, ifStats))
+	lnstats, err := sb.Statistics()
+	if err != nil {
+		return nil, err
 	}
 
-	return list, nil
+	stats := make(map[string]types.NetworkStats)
+	// Convert libnetwork nw stats into engine-api stats
+	for ifName, ifStats := range lnstats {
+		stats[ifName] = types.NetworkStats{
+			RxBytes:   ifStats.RxBytes,
+			RxPackets: ifStats.RxPackets,
+			RxErrors:  ifStats.RxErrors,
+			RxDropped: ifStats.RxDropped,
+			TxBytes:   ifStats.TxBytes,
+			TxPackets: ifStats.TxPackets,
+			TxErrors:  ifStats.TxErrors,
+			TxDropped: ifStats.TxDropped,
+		}
+	}
+
+	return stats, nil
 }
 
 // newBaseContainer creates a new container with its initial
@@ -1601,8 +1498,9 @@ func (daemon *Daemon) initDiscovery(config *Config) error {
 
 // Reload reads configuration changes and modifies the
 // daemon according to those changes.
-// This are the settings that Reload changes:
+// These are the settings that Reload changes:
 // - Daemon labels.
+// - Daemon debug log level.
 // - Cluster discovery (reconfigure and restart).
 func (daemon *Daemon) Reload(config *Config) error {
 	daemon.configStore.reloadLock.Lock()
@@ -1674,19 +1572,6 @@ func (daemon *Daemon) reloadClusterDiscovery(config *Config) error {
 	return nil
 }
 
-func convertLnNetworkStats(name string, stats *lntypes.InterfaceStatistics) *libcontainer.NetworkInterface {
-	n := &libcontainer.NetworkInterface{Name: name}
-	n.RxBytes = stats.RxBytes
-	n.RxPackets = stats.RxPackets
-	n.RxErrors = stats.RxErrors
-	n.RxDropped = stats.RxDropped
-	n.TxBytes = stats.TxBytes
-	n.TxPackets = stats.TxPackets
-	n.TxErrors = stats.TxErrors
-	n.TxDropped = stats.TxDropped
-	return n
-}
-
 func validateID(id string) error {
 	if id == "" {
 		return fmt.Errorf("Invalid empty id")
@@ -1734,4 +1619,17 @@ func (daemon *Daemon) networkOptions(dconfig *Config) ([]nwconfig.Option, error)
 	options = append(options, nwconfig.OptionLabels(dconfig.Labels))
 	options = append(options, driverOptions(dconfig)...)
 	return options, nil
+}
+
+func copyBlkioEntry(entries []*containerd.BlkioStatsEntry) []types.BlkioStatEntry {
+	out := make([]types.BlkioStatEntry, len(entries))
+	for i, re := range entries {
+		out[i] = types.BlkioStatEntry{
+			Major: re.Major,
+			Minor: re.Minor,
+			Op:    re.Op,
+			Value: re.Value,
+		}
+	}
+	return out
 }

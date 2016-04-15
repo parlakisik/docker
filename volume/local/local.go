@@ -77,6 +77,10 @@ func New(scope string, rootUID, rootGID int) (*Root, error) {
 	}
 
 	for _, d := range dirs {
+		if !d.IsDir() {
+			continue
+		}
+
 		name := filepath.Base(d.Name())
 		v := &localVolume{
 			driverName: r.Name(),
@@ -117,9 +121,11 @@ type Root struct {
 // List lists all the volumes
 func (r *Root) List() ([]volume.Volume, error) {
 	var ls []volume.Volume
+	r.m.Lock()
 	for _, v := range r.volumes {
 		ls = append(ls, v)
 	}
+	r.m.Unlock()
 	return ls, nil
 }
 
@@ -198,7 +204,7 @@ func (r *Root) Remove(v volume.Volume) error {
 
 	lv, ok := v.(*localVolume)
 	if !ok {
-		return fmt.Errorf("unknown volume type")
+		return fmt.Errorf("unknown volume type %T", v)
 	}
 
 	realPath, err := filepath.EvalSymlinks(lv.path)
@@ -252,8 +258,7 @@ func (r *Root) validateName(name string) error {
 // localVolume implements the Volume interface from the volume package and
 // represents the volumes created by Root.
 type localVolume struct {
-	m         sync.Mutex
-	usedCount int
+	m sync.Mutex
 	// unique name of the volume
 	name string
 	// path is the path on the host where the data lives

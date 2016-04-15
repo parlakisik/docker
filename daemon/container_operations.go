@@ -48,7 +48,7 @@ func (daemon *Daemon) buildSandboxOptions(container *container.Container, n libn
 		sboxOptions = append(sboxOptions, libnetwork.OptionUseDefaultSandbox())
 		sboxOptions = append(sboxOptions, libnetwork.OptionOriginHostsPath("/etc/hosts"))
 		sboxOptions = append(sboxOptions, libnetwork.OptionOriginResolvConfPath("/etc/resolv.conf"))
-	} else if daemon.execDriver.SupportsHooks() {
+	} else {
 		// OptionUseExternalKey is mandatory for userns support.
 		// But optional for non-userns support
 		sboxOptions = append(sboxOptions, libnetwork.OptionUseExternalKey())
@@ -323,13 +323,6 @@ func (daemon *Daemon) updateContainerNetworkSettings(container *container.Contai
 		err error
 	)
 
-	// TODO Windows: Remove this once TP4 builds are not supported
-	// Windows TP4 build don't support libnetwork and in that case
-	// daemon.netController will be nil
-	if daemon.netController == nil {
-		return nil
-	}
-
 	mode := container.HostConfig.NetworkMode
 	if container.Config.NetworkDisabled || mode.IsContainer() {
 		return nil
@@ -512,13 +505,6 @@ func (daemon *Daemon) updateNetworkConfig(container *container.Container, idOrNa
 }
 
 func (daemon *Daemon) connectToNetwork(container *container.Container, idOrName string, endpointConfig *networktypes.EndpointSettings, updateSettings bool) (err error) {
-	// TODO Windows: Remove this once TP4 builds are not supported
-	// Windows TP4 build don't support libnetwork and in that case
-	// daemon.netController will be nil
-	if daemon.netController == nil {
-		return nil
-	}
-
 	n, err := daemon.updateNetworkConfig(container, idOrName, endpointConfig, updateSettings)
 	if err != nil {
 		return err
@@ -645,13 +631,6 @@ func disconnectFromNetwork(container *container.Container, n libnetwork.Network,
 func (daemon *Daemon) initializeNetworking(container *container.Container) error {
 	var err error
 
-	// TODO Windows: Remove this once TP4 builds are not supported
-	// Windows TP4 build don't support libnetwork and in that case
-	// daemon.netController will be nil
-	if daemon.netController == nil {
-		return nil
-	}
-
 	if container.HostConfig.NetworkMode.IsContainer() {
 		// we need to get the hosts files from the container to join
 		nc, err := daemon.getNetworkedContainer(container.ID, container.HostConfig.NetworkMode.ConnectedContainer())
@@ -671,13 +650,6 @@ func (daemon *Daemon) initializeNetworking(container *container.Container) error
 		if err != nil {
 			return err
 		}
-
-		parts := strings.SplitN(container.Config.Hostname, ".", 2)
-		if len(parts) > 1 {
-			container.Config.Hostname = parts[0]
-			container.Config.Domainname = parts[1]
-		}
-
 	}
 
 	if err := daemon.allocateNetwork(container); err != nil {
@@ -728,7 +700,7 @@ func (daemon *Daemon) releaseNetwork(container *container.Container) {
 
 	sb, err := daemon.netController.SandboxByID(sid)
 	if err != nil {
-		logrus.Errorf("error locating sandbox id %s: %v", sid, err)
+		logrus.Warnf("error locating sandbox id %s: %v", sid, err)
 		return
 	}
 
