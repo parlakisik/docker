@@ -15,7 +15,7 @@ weight = 3
 
  - The Remote API has replaced `rcli`.
  - The daemon listens on `unix:///var/run/docker.sock` but you can
-   [Bind Docker to another host/port or a Unix socket](../../quickstart.md#bind-docker-to-another-host-port-or-a-unix-socket).
+   [Bind Docker to another host/port or a Unix socket](../commandline/dockerd.md#bind-docker-to-another-host-port-or-a-unix-socket).
  - The API tends to be REST, but for some complex commands, like `attach`
    or `pull`, the HTTP connection is hijacked to transport `STDOUT`,
    `STDIN` and `STDERR`.
@@ -206,13 +206,6 @@ Json Parameters:
 -   **Domainname** - A string value containing the desired domain name to use
       for the container.
 -   **User** - A string value containing the user to use inside the container.
--   **Memory** - Memory limit in bytes.
--   **MemorySwap** - Total memory limit (memory + swap); set `-1` to enable unlimited swap.
-      You must use this with `memory` and make the swap value larger than `memory`.
--   **CpuShares** - An integer value containing the CPU Shares for container
-      (ie. the relative weight vs other containers).
--   **Cpuset** - The same as CpusetCpus, but deprecated, please don't use.
--   **CpusetCpus** - String value containing the cgroups CpusetCpus to use.
 -   **AttachStdin** - Boolean value, attaches to stdin.
 -   **AttachStdout** - Boolean value, attaches to stdout.
 -   **AttachStderr** - Boolean value, attaches to stderr.
@@ -243,6 +236,12 @@ Json Parameters:
           in the form of `container_name:alias`.
     -   **LxcConf** - LXC specific configurations. These configurations will only
           work when using the `lxc` execution driver.
+    -   **Memory** - Memory limit in bytes.
+    -   **MemorySwap** - Total memory limit (memory + swap); set `-1` to enable unlimited swap.
+          You must use this with `memory` and make the swap value larger than `memory`.
+    -   **CpuShares** - An integer value containing the CPU Shares for container
+          (ie. the relative weight vs other containers).
+    -   **CpusetCpus** - String value containing the cgroups CpusetCpus to use.
     -   **PortBindings** - A map of exposed container ports and the host port they
           should map to. It should be specified in the form
           `{ <port>/<protocol>: [{ "HostPort": "<port>" }] }`
@@ -293,6 +292,7 @@ Query Parameters:
 Status Codes:
 
 -   **201** – no error
+-   **400** – bad parameter
 -   **404** – no such container
 -   **406** – impossible to attach (container not running)
 -   **500** – server error
@@ -1252,7 +1252,6 @@ Query Parameters:
         can be retrieved or `-` to read the image from the request body.
 -   **repo** – repository
 -   **tag** – tag
--   **registry** – the registry to pull from
 
     Request Headers:
 

@@ -15,7 +15,7 @@ weight=-2
 
  - The Remote API has replaced `rcli`.
  - The daemon listens on `unix:///var/run/docker.sock` but you can
-   [Bind Docker to another host/port or a Unix socket](../../quickstart.md#bind-docker-to-another-host-port-or-a-unix-socket).
+   [Bind Docker to another host/port or a Unix socket](../commandline/dockerd.md#bind-docker-to-another-host-port-or-a-unix-socket).
  - The API tends to be REST. However, for some complex commands, like `attach`
    or `pull`, the HTTP connection is hijacked to transport `stdout`,
    `stdin` and `stderr`.
@@ -225,21 +225,6 @@ Json Parameters:
 -   **Domainname** - A string value containing the domain name to use
       for the container.
 -   **User** - A string value specifying the user inside the container.
--   **Memory** - Memory limit in bytes.
--   **MemorySwap** - Total memory limit (memory + swap); set `-1` to enable unlimited swap.
-      You must use this with `memory` and make the swap value larger than `memory`.
--   **MemoryReservation** - Memory soft limit in bytes.
--   **KernelMemory** - Kernel memory limit in bytes.
--   **CpuShares** - An integer value containing the container's CPU Shares
-      (ie. the relative weight vs other containers).
--   **CpuPeriod** - The length of a CPU period in microseconds.
--   **CpuQuota** - Microseconds of CPU time that the container can get in a CPU period.
--   **Cpuset** - Deprecated please don't use. Use `CpusetCpus` instead.
--   **CpusetCpus** - String value containing the `cgroups CpusetCpus` to use.
--   **CpusetMems** - Memory nodes (MEMs) in which to allow execution (0-3, 0,1). Only effective on NUMA systems.
--   **BlkioWeight** - Block IO weight (relative weight) accepts a weight value between 10 and 1000.
--   **MemorySwappiness** - Tune a container's memory swappiness behavior. Accepts an integer between 0 and 100.
--   **OomKillDisable** - Boolean value, whether to disable OOM Killer for the container or not.
 -   **AttachStdin** - Boolean value, attaches to `stdin`.
 -   **AttachStdout** - Boolean value, attaches to `stdout`.
 -   **AttachStderr** - Boolean value, attaches to `stderr`.
@@ -272,6 +257,20 @@ Json Parameters:
           in the form of `container_name:alias`.
     -   **LxcConf** - LXC specific configurations. These configurations only
           work when using the `lxc` execution driver.
+    -   **Memory** - Memory limit in bytes.
+    -   **MemorySwap** - Total memory limit (memory + swap); set `-1` to enable unlimited swap.
+          You must use this with `memory` and make the swap value larger than `memory`.
+    -   **MemoryReservation** - Memory soft limit in bytes.
+    -   **KernelMemory** - Kernel memory limit in bytes.
+    -   **CpuShares** - An integer value containing the container's CPU Shares
+          (ie. the relative weight vs other containers).
+    -   **CpuPeriod** - The length of a CPU period in microseconds.
+    -   **CpuQuota** - Microseconds of CPU time that the container can get in a CPU period.
+    -   **CpusetCpus** - String value containing the `cgroups CpusetCpus` to use.
+    -   **CpusetMems** - Memory nodes (MEMs) in which to allow execution (0-3, 0,1). Only effective on NUMA systems.
+    -   **BlkioWeight** - Block IO weight (relative weight) accepts a weight value between 10 and 1000.
+    -   **MemorySwappiness** - Tune a container's memory swappiness behavior. Accepts an integer between 0 and 100.
+    -   **OomKillDisable** - Boolean value, whether to disable OOM Killer for the container or not.
     -   **PortBindings** - A map of exposed container ports and the host port they
           should map to. A JSON object in the form
           `{ <port>/<protocol>: [{ "HostPort": "<port>" }] }`
@@ -307,10 +306,6 @@ Json Parameters:
     -   **Devices** - A list of devices to add to the container specified as a JSON object in the
       form
           `{ "PathOnHost": "/dev/deviceName", "PathInContainer": "/dev/deviceName", "CgroupPermissions": "mrw"}`
-    -   **Sysctls** - A list of kernel parameters (sysctls) to set in the container, specified as
-          `{ <name>: <Value> }`, for example:
-	  `{ "net.ipv4.ip_forward": "1" }`
-
     -   **Ulimits** - A list of ulimits to set in the container, specified as
           `{ "Name": <name>, "Soft": <soft limit>, "Hard": <hard limit> }`, for example:
           `Ulimits: { "Name": "nofile", "Soft": 1024, "Hard": 2048 }`
@@ -331,6 +326,7 @@ Query Parameters:
 Status Codes:
 
 -   **201** – no error
+-   **400** – bad parameter
 -   **404** – no such container
 -   **406** – impossible to attach (container not running)
 -   **500** – server error
@@ -431,9 +427,6 @@ Return low-level information on the container `id`
 				"Type": "json-file"
 			},
 			"SecurityOpt": null,
-			"Sysctls": {
-			        "net.ipv4.ip_forward": "1"
-			},
 			"VolumesFrom": null,
 			"Ulimits": [{}],
 			"VolumeDriver": ""
@@ -1219,7 +1212,7 @@ following section.
 
 `GET /containers/(id or name)/archive`
 
-Get an tar archive of a resource in the filesystem of container `id`.
+Get a tar archive of a resource in the filesystem of container `id`.
 
 Query Parameters:
 
@@ -1495,14 +1488,14 @@ Query Parameters:
                 }
             }
 
-        This object maps the hostname of a registry to an object containing the
-        "username" and "password" for that registry. Multiple registries may
-        be specified as the build may be based on an image requiring
-        authentication to pull from any arbitrary registry. Only the registry
-        domain name (and port if not the default "443") are required. However
-        (for legacy reasons) the "official" Docker, Inc. hosted registry must
-        be specified with both a "https://" prefix and a "/v1/" suffix even
-        though Docker will prefer to use the v2 registry API.
+    This object maps the hostname of a registry to an object containing the
+    "username" and "password" for that registry. Multiple registries may
+    be specified as the build may be based on an image requiring
+    authentication to pull from any arbitrary registry. Only the registry
+    domain name (and port if not the default "443") are required. However
+    (for legacy reasons) the "official" Docker, Inc. hosted registry must
+    be specified with both a "https://" prefix and a "/v1/" suffix even
+    though Docker will prefer to use the v2 registry API.
 
 Status Codes:
 

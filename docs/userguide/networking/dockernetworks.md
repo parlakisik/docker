@@ -18,7 +18,7 @@ applications run on. Docker container networks give you that control.
 
 This section provides an overview of the default networking behavior that Docker
 Engine delivers natively. It describes the type of networks created by default
-and how to create your own, user--defined networks. It also describes the
+and how to create your own, user-defined networks. It also describes the
 resources required to create networks on a single host or across a cluster of
 hosts.
 
@@ -35,7 +35,7 @@ NETWORK ID          NAME                DRIVER
 cf03ee007fb4        host                host
 ```
 
-Historically, these three networks are  part of Docker's implementation. When
+Historically, these three networks are part of Docker's implementation. When
 you run a container you can use the `--net` flag to specify which network you
 want to run a container on. These three networks are still available to you.
 
@@ -57,7 +57,7 @@ docker0   Link encap:Ethernet  HWaddr 02:42:47:bc:3a:eb
           RX bytes:1100 (1.1 KB)  TX bytes:648 (648.0 B)
 ```
 
-The `none` network adds a container to a container-specific network stack. That container lacks a network interface. Attaching to such a container and looking at it's stack you see this:
+The `none` network adds a container to a container-specific network stack. That container lacks a network interface. Attaching to such a container and looking at its stack you see this:
 
 ```
 $ docker attach nonenetcontainer
@@ -95,7 +95,7 @@ worth looking at the default `bridge` network a bit.
 
 
 ### The default bridge network in detail
-The default `bridge` network is present on all Docker hosts. The `docker network inspect` 
+The default `bridge` network is present on all Docker hosts. The `docker network inspect`
 command returns information about a network:
 
 ```
@@ -138,7 +138,7 @@ $ docker run -itd --name=container2 busybox
 94447ca479852d29aeddca75c28f7104df3c3196d7b6d83061879e339946805c
 ```
 
-Inspecting the `bridge` network again after starting two containers shows both newly launched containers in the network. Their ids show up in the container
+Inspecting the `bridge` network again after starting two containers shows both newly launched containers in the network. Their ids show up in the "Containers" section of `docker network inspect`:
 
 ```
 $ docker network inspect bridge
@@ -293,7 +293,9 @@ specifications.
 You can create multiple networks. You can add containers to more than one
 network. Containers can only communicate within networks but not across
 networks. A container attached to two networks can communicate with member
-containers in either network.
+containers in either network. When a container is connected to multiple
+networks, its external connectivity is provided via the first non-internal
+network, in lexical order.
 
 The next few sections describe each of Docker's built-in network drivers in
 greater detail.
@@ -517,7 +519,7 @@ functionality in user-defined networks.
 
 - [Work with network commands](work-with-networks.md)
 - [Get started with multi-host networking](get-started-overlay.md)
-- [Managing Data in Containers](../containers/dockervolumes.md)
+- [Managing Data in Containers](../../tutorials/dockervolumes.md)
 - [Docker Machine overview](https://docs.docker.com/machine)
 - [Docker Swarm overview](https://docs.docker.com/swarm)
 - [Investigate the LibNetwork project](https://github.com/docker/libnetwork)

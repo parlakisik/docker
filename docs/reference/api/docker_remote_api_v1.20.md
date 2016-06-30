@@ -15,7 +15,7 @@ weight = 1
 
  - The Remote API has replaced `rcli`.
  - The daemon listens on `unix:///var/run/docker.sock` but you can
-   [Bind Docker to another host/port or a Unix socket](../../quickstart.md#bind-docker-to-another-host-port-or-a-unix-socket).
+   [Bind Docker to another host/port or a Unix socket](../commandline/dockerd.md#bind-docker-to-another-host-port-or-a-unix-socket).
  - The API tends to be REST. However, for some complex commands, like `attach`
    or `pull`, the HTTP connection is hijacked to transport `stdout`,
    `stdin` and `stderr`.
@@ -215,19 +215,6 @@ Json Parameters:
 -   **Domainname** - A string value containing the domain name to use
       for the container.
 -   **User** - A string value specifying the user inside the container.
--   **Memory** - Memory limit in bytes.
--   **MemorySwap** - Total memory limit (memory + swap); set `-1` to enable unlimited swap.
-      You must use this with `memory` and make the swap value larger than `memory`.
--   **CpuShares** - An integer value containing the container's CPU Shares
-      (ie. the relative weight vs other containers).
--   **CpuPeriod** - The length of a CPU period in microseconds.
--   **CpuQuota** - Microseconds of CPU time that the container can get in a CPU period.
--   **Cpuset** - Deprecated please don't use. Use `CpusetCpus` instead. 
--   **CpusetCpus** - String value containing the `cgroups CpusetCpus` to use.
--   **CpusetMems** - Memory nodes (MEMs) in which to allow execution (0-3, 0,1). Only effective on NUMA systems.
--   **BlkioWeight** - Block IO weight (relative weight) accepts a weight value between 10 and 1000.
--   **MemorySwappiness** - Tune a container's memory swappiness behavior. Accepts an integer between 0 and 100.
--   **OomKillDisable** - Boolean value, whether to disable OOM Killer for the container or not.
 -   **AttachStdin** - Boolean value, attaches to `stdin`.
 -   **AttachStdout** - Boolean value, attaches to `stdout`.
 -   **AttachStderr** - Boolean value, attaches to `stderr`.
@@ -257,6 +244,18 @@ Json Parameters:
           in the form of `container_name:alias`.
     -   **LxcConf** - LXC specific configurations. These configurations only
           work when using the `lxc` execution driver.
+    -   **Memory** - Memory limit in bytes.
+    -   **MemorySwap** - Total memory limit (memory + swap); set `-1` to enable unlimited swap.
+          You must use this with `memory` and make the swap value larger than `memory`.
+    -   **CpuShares** - An integer value containing the container's CPU Shares
+          (ie. the relative weight vs other containers).
+    -   **CpuPeriod** - The length of a CPU period in microseconds.
+    -   **CpuQuota** - Microseconds of CPU time that the container can get in a CPU period.
+    -   **CpusetCpus** - String value containing the `cgroups CpusetCpus` to use.
+    -   **CpusetMems** - Memory nodes (MEMs) in which to allow execution (0-3, 0,1). Only effective on NUMA systems.
+    -   **BlkioWeight** - Block IO weight (relative weight) accepts a weight value between 10 and 1000.
+    -   **MemorySwappiness** - Tune a container's memory swappiness behavior. Accepts an integer between 0 and 100.
+    -   **OomKillDisable** - Boolean value, whether to disable OOM Killer for the container or not.
     -   **PortBindings** - A map of exposed container ports and the host port they
           should map to. A JSON object in the form
           `{ <port>/<protocol>: [{ "HostPort": "<port>" }] }`
@@ -308,6 +307,7 @@ Query Parameters:
 Status Codes:
 
 -   **201** – no error
+-   **400** – bad parameter
 -   **404** – no such container
 -   **406** – impossible to attach (container not running)
 -   **500** – server error
@@ -1128,7 +1128,7 @@ following section.
 
 `GET /containers/(id or name)/archive`
 
-Get an tar archive of a resource in the filesystem of container `id`.
+Get a tar archive of a resource in the filesystem of container `id`.
 
 Query Parameters:
 
@@ -1362,12 +1362,12 @@ or being killed.
 
 Query Parameters:
 
--   **dockerfile** - Path within the build context to the Dockerfile. This is 
+-   **dockerfile** - Path within the build context to the Dockerfile. This is
         ignored if `remote` is specified and points to an individual filename.
 -   **t** – A repository name (and optionally a tag) to apply to
         the resulting image in case of success.
--   **remote** – A Git repository URI or HTTP/HTTPS URI build source. If the 
-        URI specifies a filename, the file's contents are placed into a file 
+-   **remote** – A Git repository URI or HTTP/HTTPS URI build source. If the
+        URI specifies a filename, the file's contents are placed into a file
 		called `Dockerfile`.
 -   **q** – Suppress verbose build output.
 -   **nocache** – Do not use the cache when building the image.
@@ -1398,14 +1398,14 @@ Query Parameters:
                 }
             }
 
-        This object maps the hostname of a registry to an object containing the
-        "username" and "password" for that registry. Multiple registries may
-        be specified as the build may be based on an image requiring
-        authentication to pull from any arbitrary registry. Only the registry
-        domain name (and port if not the default "443") are required. However
-        (for legacy reasons) the "official" Docker, Inc. hosted registry must
-        be specified with both a "https://" prefix and a "/v1/" suffix even
-        though Docker will prefer to use the v2 registry API.
+    This object maps the hostname of a registry to an object containing the
+    "username" and "password" for that registry. Multiple registries may
+    be specified as the build may be based on an image requiring
+    authentication to pull from any arbitrary registry. Only the registry
+    domain name (and port if not the default "443") are required. However
+    (for legacy reasons) the "official" Docker, Inc. hosted registry must
+    be specified with both a "https://" prefix and a "/v1/" suffix even
+    though Docker will prefer to use the v2 registry API.
 
 Status Codes:
 
@@ -1443,7 +1443,6 @@ Query Parameters:
         can be retrieved or `-` to read the image from the request body.
 -   **repo** – Repository name.
 -   **tag** – Tag.
--   **registry** – The registry to pull from.
 
     Request Headers:
 
@@ -2339,7 +2338,7 @@ from **200 OK** to **101 UPGRADED** and resends the same headers.
 
 ## 3.3 CORS Requests
 
-To set cross origin requests to the remote api please give values to 
+To set cross origin requests to the remote api please give values to
 `--api-cors-header` when running Docker in daemon mode. Set * (asterisk) allows all,
 default or blank means CORS disabled
 

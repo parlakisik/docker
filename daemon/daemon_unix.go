@@ -3,6 +3,7 @@
 package daemon
 
 import (
+	"bytes"
 	"fmt"
 	"io/ioutil"
 	"net"
@@ -27,13 +28,14 @@ import (
 	"github.com/docker/docker/runconfig"
 	runconfigopts "github.com/docker/docker/runconfig/opts"
 	"github.com/docker/engine-api/types"
+	"github.com/docker/engine-api/types/blkiodev"
 	pblkiodev "github.com/docker/engine-api/types/blkiodev"
 	containertypes "github.com/docker/engine-api/types/container"
 	"github.com/docker/libnetwork"
 	nwconfig "github.com/docker/libnetwork/config"
 	"github.com/docker/libnetwork/drivers/bridge"
-	"github.com/docker/libnetwork/ipamutils"
 	"github.com/docker/libnetwork/netlabel"
+	"github.com/docker/libnetwork/netutils"
 	"github.com/docker/libnetwork/options"
 	lntypes "github.com/docker/libnetwork/types"
 	"github.com/opencontainers/runc/libcontainer/label"
@@ -152,7 +154,7 @@ func parseSecurityOpt(container *container.Container, config *containertypes.Hos
 				con = strings.SplitN(opt, "=", 2)
 			} else if strings.Contains(opt, ":") {
 				con = strings.SplitN(opt, ":", 2)
-				logrus.Warnf("Security options with `:` as a separator are deprecated and will be completely unsupported in 1.13, use `=` instead.")
+				logrus.Warn("Security options with `:` as a separator are deprecated and will be completely unsupported in 1.13, use `=` instead.")
 			}
 
 			if len(con) != 2 {
@@ -176,81 +178,27 @@ func parseSecurityOpt(container *container.Container, config *containertypes.Hos
 	return err
 }
 
-func getBlkioReadIOpsDevices(config containertypes.Resources) ([]specs.ThrottleDevice, error) {
-	var blkioReadIOpsDevice []specs.ThrottleDevice
+func getBlkioThrottleDevices(devs []*blkiodev.ThrottleDevice) ([]specs.ThrottleDevice, error) {
+	var throttleDevices []specs.ThrottleDevice
 	var stat syscall.Stat_t
 
-	for _, iopsDevice := range config.BlkioDeviceReadIOps {
-		if err := syscall.Stat(iopsDevice.Path, &stat); err != nil {
+	for _, d := range devs {
+		if err := syscall.Stat(d.Path, &stat); err != nil {
 			return nil, err
 		}
-		rate := iopsDevice.Rate
+		rate := d.Rate
 		d := specs.ThrottleDevice{Rate: &rate}
 		d.Major = int64(stat.Rdev / 256)
 		d.Minor = int64(stat.Rdev % 256)
-		blkioReadIOpsDevice = append(blkioReadIOpsDevice, d)
+		throttleDevices = append(throttleDevices, d)
 	}
 
-	return blkioReadIOpsDevice, nil
-}
-
-func getBlkioWriteIOpsDevices(config containertypes.Resources) ([]specs.ThrottleDevice, error) {
-	var blkioWriteIOpsDevice []specs.ThrottleDevice
-	var stat syscall.Stat_t
-
-	for _, iopsDevice := range config.BlkioDeviceWriteIOps {
-		if err := syscall.Stat(iopsDevice.Path, &stat); err != nil {
-			return nil, err
-		}
-		rate := iopsDevice.Rate
-		d := specs.ThrottleDevice{Rate: &rate}
-		d.Major = int64(stat.Rdev / 256)
-		d.Minor = int64(stat.Rdev % 256)
-		blkioWriteIOpsDevice = append(blkioWriteIOpsDevice, d)
-	}
-
-	return blkioWriteIOpsDevice, nil
-}
-
-func getBlkioReadBpsDevices(config containertypes.Resources) ([]specs.ThrottleDevice, error) {
-	var blkioReadBpsDevice []specs.ThrottleDevice
-	var stat syscall.Stat_t
-
-	for _, bpsDevice := range config.BlkioDeviceReadBps {
-		if err := syscall.Stat(bpsDevice.Path, &stat); err != nil {
-			return nil, err
-		}
-		rate := bpsDevice.Rate
-		d := specs.ThrottleDevice{Rate: &rate}
-		d.Major = int64(stat.Rdev / 256)
-		d.Minor = int64(stat.Rdev % 256)
-		blkioReadBpsDevice = append(blkioReadBpsDevice, d)
-	}
-
-	return blkioReadBpsDevice, nil
-}
-
-func getBlkioWriteBpsDevices(config containertypes.Resources) ([]specs.ThrottleDevice, error) {
-	var blkioWriteBpsDevice []specs.ThrottleDevice
-	var stat syscall.Stat_t
-
-	for _, bpsDevice := range config.BlkioDeviceWriteBps {
-		if err := syscall.Stat(bpsDevice.Path, &stat); err != nil {
-			return nil, err
-		}
-		rate := bpsDevice.Rate
-		d := specs.ThrottleDevice{Rate: &rate}
-		d.Major = int64(stat.Rdev / 256)
-		d.Minor = int64(stat.Rdev % 256)
-		blkioWriteBpsDevice = append(blkioWriteBpsDevice, d)
-	}
-
-	return blkioWriteBpsDevice, nil
+	return throttleDevices, nil
 }
 
 func checkKernelVersion(k, major, minor int) bool {
 	if v, err := kernel.GetKernelVersion(); err != nil {
-		logrus.Warnf("%s", err)
+		logrus.Warnf("error getting kernel version: %s", err)
 	} else {
 		if kernel.CompareKernelVersion(*v, kernel.VersionInfo{Kernel: k, Major: major, Minor: minor}) < 0 {
 			return false
@@ -267,10 +215,12 @@ func checkKernel() error {
 	// without actually causing a kernel panic, so we need this workaround until
 	// the circumstances of pre-3.10 crashes are clearer.
 	// For details see https://github.com/docker/docker/issues/407
+	// Docker 1.11 and above doesn't actually run on kernels older than 3.4,
+	// due to containerd-shim usage of PR_SET_CHILD_SUBREAPER (introduced in 3.4).
 	if !checkKernelVersion(3, 10, 0) {
 		v, _ := kernel.GetKernelVersion()
 		if os.Getenv("DOCKER_NOWARN_KERNEL_VERSION") == "" {
-			logrus.Warnf("Your Linux kernel version %s can be unstable running docker. Please upgrade your kernel to 3.10.0.", v.String())
+			logrus.Fatalf("Your Linux kernel version %s is not supported for running docker. Please upgrade your kernel to 3.10.0 or newer.", v.String())
 		}
 	}
 	return nil
@@ -298,7 +248,7 @@ func (daemon *Daemon) adaptContainerSettings(hostConfig *containertypes.HostConf
 	}
 	var err error
 	if hostConfig.SecurityOpt == nil {
-		hostConfig.SecurityOpt, err = daemon.generateSecurityOpt(hostConfig.IpcMode, hostConfig.PidMode)
+		hostConfig.SecurityOpt, err = daemon.generateSecurityOpt(hostConfig.IpcMode, hostConfig.PidMode, hostConfig.Privileged)
 		if err != nil {
 			return err
 		}
@@ -324,13 +274,13 @@ func verifyContainerResources(resources *containertypes.Resources, sysInfo *sysi
 	}
 	if resources.Memory > 0 && !sysInfo.MemoryLimit {
 		warnings = append(warnings, "Your kernel does not support memory limit capabilities. Limitation discarded.")
-		logrus.Warnf("Your kernel does not support memory limit capabilities. Limitation discarded.")
+		logrus.Warn("Your kernel does not support memory limit capabilities. Limitation discarded.")
 		resources.Memory = 0
 		resources.MemorySwap = -1
 	}
 	if resources.Memory > 0 && resources.MemorySwap != -1 && !sysInfo.SwapLimit {
 		warnings = append(warnings, "Your kernel does not support swap limit capabilities, memory limited without swap.")
-		logrus.Warnf("Your kernel does not support swap limit capabilities, memory limited without swap.")
+		logrus.Warn("Your kernel does not support swap limit capabilities, memory limited without swap.")
 		resources.MemorySwap = -1
 	}
 	if resources.Memory > 0 && resources.MemorySwap > 0 && resources.MemorySwap < resources.Memory {
@@ -341,7 +291,7 @@ func verifyContainerResources(resources *containertypes.Resources, sysInfo *sysi
 	}
 	if resources.MemorySwappiness != nil && *resources.MemorySwappiness != -1 && !sysInfo.MemorySwappiness {
 		warnings = append(warnings, "Your kernel does not support memory swappiness capabilities, memory swappiness discarded.")
-		logrus.Warnf("Your kernel does not support memory swappiness capabilities, memory swappiness discarded.")
+		logrus.Warn("Your kernel does not support memory swappiness capabilities, memory swappiness discarded.")
 		resources.MemorySwappiness = nil
 	}
 	if resources.MemorySwappiness != nil {
@@ -352,7 +302,7 @@ func verifyContainerResources(resources *containertypes.Resources, sysInfo *sysi
 	}
 	if resources.MemoryReservation > 0 && !sysInfo.MemoryReservation {
 		warnings = append(warnings, "Your kernel does not support memory soft limit capabilities. Limitation discarded.")
-		logrus.Warnf("Your kernel does not support memory soft limit capabilities. Limitation discarded.")
+		logrus.Warn("Your kernel does not support memory soft limit capabilities. Limitation discarded.")
 		resources.MemoryReservation = 0
 	}
 	if resources.MemoryReservation > 0 && resources.MemoryReservation < linuxMinMemory {
@@ -363,7 +313,7 @@ func verifyContainerResources(resources *containertypes.Resources, sysInfo *sysi
 	}
 	if resources.KernelMemory > 0 && !sysInfo.KernelMemory {
 		warnings = append(warnings, "Your kernel does not support kernel memory limit capabilities. Limitation discarded.")
-		logrus.Warnf("Your kernel does not support kernel memory limit capabilities. Limitation discarded.")
+		logrus.Warn("Your kernel does not support kernel memory limit capabilities. Limitation discarded.")
 		resources.KernelMemory = 0
 	}
 	if resources.KernelMemory > 0 && resources.KernelMemory < linuxMinMemory {
@@ -371,41 +321,41 @@ func verifyContainerResources(resources *containertypes.Resources, sysInfo *sysi
 	}
 	if resources.KernelMemory > 0 && !checkKernelVersion(4, 0, 0) {
 		warnings = append(warnings, "You specified a kernel memory limit on a kernel older than 4.0. Kernel memory limits are experimental on older kernels, it won't work as expected and can cause your system to be unstable.")
-		logrus.Warnf("You specified a kernel memory limit on a kernel older than 4.0. Kernel memory limits are experimental on older kernels, it won't work as expected and can cause your system to be unstable.")
+		logrus.Warn("You specified a kernel memory limit on a kernel older than 4.0. Kernel memory limits are experimental on older kernels, it won't work as expected and can cause your system to be unstable.")
 	}
 	if resources.OomKillDisable != nil && !sysInfo.OomKillDisable {
 		// only produce warnings if the setting wasn't to *disable* the OOM Kill; no point
 		// warning the caller if they already wanted the feature to be off
 		if *resources.OomKillDisable {
 			warnings = append(warnings, "Your kernel does not support OomKillDisable, OomKillDisable discarded.")
-			logrus.Warnf("Your kernel does not support OomKillDisable, OomKillDisable discarded.")
+			logrus.Warn("Your kernel does not support OomKillDisable, OomKillDisable discarded.")
 		}
 		resources.OomKillDisable = nil
 	}
 
 	if resources.PidsLimit != 0 && !sysInfo.PidsLimit {
 		warnings = append(warnings, "Your kernel does not support pids limit capabilities, pids limit discarded.")
-		logrus.Warnf("Your kernel does not support pids limit capabilities, pids limit discarded.")
+		logrus.Warn("Your kernel does not support pids limit capabilities, pids limit discarded.")
 		resources.PidsLimit = 0
 	}
 
 	// cpu subsystem checks and adjustments
 	if resources.CPUShares > 0 && !sysInfo.CPUShares {
 		warnings = append(warnings, "Your kernel does not support CPU shares. Shares discarded.")
-		logrus.Warnf("Your kernel does not support CPU shares. Shares discarded.")
+		logrus.Warn("Your kernel does not support CPU shares. Shares discarded.")
 		resources.CPUShares = 0
 	}
 	if resources.CPUPeriod > 0 && !sysInfo.CPUCfsPeriod {
 		warnings = append(warnings, "Your kernel does not support CPU cfs period. Period discarded.")
-		logrus.Warnf("Your kernel does not support CPU cfs period. Period discarded.")
+		logrus.Warn("Your kernel does not support CPU cfs period. Period discarded.")
 		resources.CPUPeriod = 0
 	}
-	if resources.CPUPeriod > 0 && (resources.CPUPeriod < 1000 || resources.CPUQuota > 1000000) {
+	if resources.CPUPeriod != 0 && (resources.CPUPeriod < 1000 || resources.CPUPeriod > 1000000) {
 		return warnings, fmt.Errorf("CPU cfs period can not be less than 1ms (i.e. 1000) or larger than 1s (i.e. 1000000)")
 	}
 	if resources.CPUQuota > 0 && !sysInfo.CPUCfsQuota {
 		warnings = append(warnings, "Your kernel does not support CPU cfs quota. Quota discarded.")
-		logrus.Warnf("Your kernel does not support CPU cfs quota. Quota discarded.")
+		logrus.Warn("Your kernel does not support CPU cfs quota. Quota discarded.")
 		resources.CPUQuota = 0
 	}
 	if resources.CPUQuota > 0 && resources.CPUQuota < 1000 {
@@ -420,7 +370,7 @@ func verifyContainerResources(resources *containertypes.Resources, sysInfo *sysi
 	// cpuset subsystem checks and adjustments
 	if (resources.CpusetCpus != "" || resources.CpusetMems != "") && !sysInfo.Cpuset {
 		warnings = append(warnings, "Your kernel does not support cpuset. Cpuset discarded.")
-		logrus.Warnf("Your kernel does not support cpuset. Cpuset discarded.")
+		logrus.Warn("Your kernel does not support cpuset. Cpuset discarded.")
 		resources.CpusetCpus = ""
 		resources.CpusetMems = ""
 	}
@@ -442,35 +392,38 @@ func verifyContainerResources(resources *containertypes.Resources, sysInfo *sysi
 	// blkio subsystem checks and adjustments
 	if resources.BlkioWeight > 0 && !sysInfo.BlkioWeight {
 		warnings = append(warnings, "Your kernel does not support Block I/O weight. Weight discarded.")
-		logrus.Warnf("Your kernel does not support Block I/O weight. Weight discarded.")
+		logrus.Warn("Your kernel does not support Block I/O weight. Weight discarded.")
 		resources.BlkioWeight = 0
 	}
 	if resources.BlkioWeight > 0 && (resources.BlkioWeight < 10 || resources.BlkioWeight > 1000) {
 		return warnings, fmt.Errorf("Range of blkio weight is from 10 to 1000")
 	}
+	if resources.IOMaximumBandwidth != 0 || resources.IOMaximumIOps != 0 {
+		return warnings, fmt.Errorf("Invalid QoS settings: %s does not support Maximum IO Bandwidth or Maximum IO IOps", runtime.GOOS)
+	}
 	if len(resources.BlkioWeightDevice) > 0 && !sysInfo.BlkioWeightDevice {
 		warnings = append(warnings, "Your kernel does not support Block I/O weight_device.")
-		logrus.Warnf("Your kernel does not support Block I/O weight_device. Weight-device discarded.")
+		logrus.Warn("Your kernel does not support Block I/O weight_device. Weight-device discarded.")
 		resources.BlkioWeightDevice = []*pblkiodev.WeightDevice{}
 	}
 	if len(resources.BlkioDeviceReadBps) > 0 && !sysInfo.BlkioReadBpsDevice {
 		warnings = append(warnings, "Your kernel does not support Block read limit in bytes per second.")
-		logrus.Warnf("Your kernel does not support Block I/O read limit in bytes per second. --device-read-bps discarded.")
+		logrus.Warn("Your kernel does not support Block I/O read limit in bytes per second. --device-read-bps discarded.")
 		resources.BlkioDeviceReadBps = []*pblkiodev.ThrottleDevice{}
 	}
 	if len(resources.BlkioDeviceWriteBps) > 0 && !sysInfo.BlkioWriteBpsDevice {
 		warnings = append(warnings, "Your kernel does not support Block write limit in bytes per second.")
-		logrus.Warnf("Your kernel does not support Block I/O write limit in bytes per second. --device-write-bps discarded.")
+		logrus.Warn("Your kernel does not support Block I/O write limit in bytes per second. --device-write-bps discarded.")
 		resources.BlkioDeviceWriteBps = []*pblkiodev.ThrottleDevice{}
 	}
 	if len(resources.BlkioDeviceReadIOps) > 0 && !sysInfo.BlkioReadIOpsDevice {
 		warnings = append(warnings, "Your kernel does not support Block read limit in IO per second.")
-		logrus.Warnf("Your kernel does not support Block I/O read limit in IO per second. -device-read-iops discarded.")
+		logrus.Warn("Your kernel does not support Block I/O read limit in IO per second. -device-read-iops discarded.")
 		resources.BlkioDeviceReadIOps = []*pblkiodev.ThrottleDevice{}
 	}
 	if len(resources.BlkioDeviceWriteIOps) > 0 && !sysInfo.BlkioWriteIOpsDevice {
 		warnings = append(warnings, "Your kernel does not support Block write limit in IO per second.")
-		logrus.Warnf("Your kernel does not support Block I/O write limit in IO per second. --device-write-iops discarded.")
+		logrus.Warn("Your kernel does not support Block I/O write limit in IO per second. --device-write-iops discarded.")
 		resources.BlkioDeviceWriteIOps = []*pblkiodev.ThrottleDevice{}
 	}
 
@@ -536,9 +489,11 @@ func verifyPlatformContainerSettings(daemon *Daemon, hostConfig *containertypes.
 	if hostConfig.OomScoreAdj < -1000 || hostConfig.OomScoreAdj > 1000 {
 		return warnings, fmt.Errorf("Invalid value %d, range for oom score adj is [-1000, 1000]", hostConfig.OomScoreAdj)
 	}
-	if sysInfo.IPv4ForwardingDisabled {
+
+	// ip-forwarding does not affect container with '--net=host' (or '--net=none')
+	if sysInfo.IPv4ForwardingDisabled && !(hostConfig.NetworkMode.IsHost() || hostConfig.NetworkMode.IsNone()) {
 		warnings = append(warnings, "IPv4 forwarding is disabled. Networking will not work.")
-		logrus.Warnf("IPv4 forwarding is disabled. Networking will not work")
+		logrus.Warn("IPv4 forwarding is disabled. Networking will not work")
 	}
 	// check for various conflicting options with user namespaces
 	if daemon.configStore.RemappedRoot != "" && hostConfig.UsernsMode.IsPrivate() {
@@ -561,7 +516,40 @@ func verifyPlatformContainerSettings(daemon *Daemon, hostConfig *containertypes.
 			return warnings, fmt.Errorf("cgroup-parent for systemd cgroup should be a valid slice named as \"xxx.slice\"")
 		}
 	}
+	if hostConfig.Runtime == "" {
+		hostConfig.Runtime = daemon.configStore.GetDefaultRuntimeName()
+	}
+
+	if rt := daemon.configStore.GetRuntime(hostConfig.Runtime); rt == nil {
+		return warnings, fmt.Errorf("Unknown runtime specified %s", hostConfig.Runtime)
+	}
+
 	return warnings, nil
+}
+
+// platformReload update configuration with platform specific options
+func (daemon *Daemon) platformReload(config *Config, attributes *map[string]string) {
+	if config.IsValueSet("runtimes") {
+		daemon.configStore.Runtimes = config.Runtimes
+		// Always set the default one
+		daemon.configStore.Runtimes[stockRuntimeName] = types.Runtime{Path: DefaultRuntimeBinary}
+	}
+
+	if config.DefaultRuntime != "" {
+		daemon.configStore.DefaultRuntime = config.DefaultRuntime
+	}
+
+	// Update attributes
+	var runtimeList bytes.Buffer
+	for name, rt := range daemon.configStore.Runtimes {
+		if runtimeList.Len() > 0 {
+			runtimeList.WriteRune(' ')
+		}
+		runtimeList.WriteString(fmt.Sprintf("%s:%s", name, rt))
+	}
+
+	(*attributes)["runtimes"] = runtimeList.String()
+	(*attributes)["default-runtime"] = daemon.configStore.DefaultRuntime
 }
 
 // verifyDaemonSettings performs validation of daemon config struct
@@ -584,6 +572,15 @@ func verifyDaemonSettings(config *Config) error {
 			return fmt.Errorf("cgroup-parent for systemd cgroup should be a valid slice named as \"xxx.slice\"")
 		}
 	}
+
+	if config.DefaultRuntime == "" {
+		config.DefaultRuntime = stockRuntimeName
+	}
+	if config.Runtimes == nil {
+		config.Runtimes = make(map[string]types.Runtime)
+	}
+	config.Runtimes[stockRuntimeName] = types.Runtime{Path: DefaultRuntimeBinary}
+
 	return nil
 }
 
@@ -630,8 +627,8 @@ func configureKernelSecuritySupport(config *Config, driverName string) error {
 	return nil
 }
 
-func (daemon *Daemon) initNetworkController(config *Config) (libnetwork.NetworkController, error) {
-	netOptions, err := daemon.networkOptions(config)
+func (daemon *Daemon) initNetworkController(config *Config, activeSandboxes map[string]interface{}) (libnetwork.NetworkController, error) {
+	netOptions, err := daemon.networkOptions(config, activeSandboxes)
 	if err != nil {
 		return nil, err
 	}
@@ -641,16 +638,24 @@ func (daemon *Daemon) initNetworkController(config *Config) (libnetwork.NetworkC
 		return nil, fmt.Errorf("error obtaining controller instance: %v", err)
 	}
 
+	if len(activeSandboxes) > 0 {
+		logrus.Infof("There are old running containers, the network config will not take affect")
+		return controller, nil
+	}
+
 	// Initialize default network on "null"
-	if _, err := controller.NewNetwork("null", "none", libnetwork.NetworkOptionPersist(false)); err != nil {
-		return nil, fmt.Errorf("Error creating default \"null\" network: %v", err)
+	if n, _ := controller.NetworkByName("none"); n == nil {
+		if _, err := controller.NewNetwork("null", "none", "", libnetwork.NetworkOptionPersist(true)); err != nil {
+			return nil, fmt.Errorf("Error creating default \"null\" network: %v", err)
+		}
 	}
 
 	// Initialize default network on "host"
-	if _, err := controller.NewNetwork("host", "host", libnetwork.NetworkOptionPersist(false)); err != nil {
-		return nil, fmt.Errorf("Error creating default \"host\" network: %v", err)
+	if n, _ := controller.NetworkByName("host"); n == nil {
+		if _, err := controller.NewNetwork("host", "host", "", libnetwork.NetworkOptionPersist(true)); err != nil {
+			return nil, fmt.Errorf("Error creating default \"host\" network: %v", err)
+		}
 	}
-
 	if !config.DisableBridge {
 		// Initialize default driver "bridge"
 		if err := initBridgeDriver(controller, config); err != nil {
@@ -704,7 +709,7 @@ func initBridgeDriver(controller libnetwork.NetworkController, config *Config) e
 
 	ipamV4Conf = &libnetwork.IpamConf{AuxAddresses: make(map[string]string)}
 
-	nw, nw6List, err := ipamutils.ElectInterfaceAddresses(bridgeName)
+	nw, nw6List, err := netutils.ElectInterfaceAddresses(bridgeName)
 	if err == nil {
 		ipamV4Conf.PreferredPool = lntypes.GetIPNetCanonical(nw).String()
 		hip, _ := lntypes.GetHostPartIP(nw.IP, nw.Mask)
@@ -782,7 +787,7 @@ func initBridgeDriver(controller libnetwork.NetworkController, config *Config) e
 		v6Conf = append(v6Conf, ipamV6Conf)
 	}
 	// Initialize default network on "bridge" with the same name
-	_, err = controller.NewNetwork("bridge", "bridge",
+	_, err = controller.NewNetwork("bridge", "bridge", "",
 		libnetwork.NetworkOptionEnableIPv6(config.bridgeConfig.EnableIPv6),
 		libnetwork.NetworkOptionDriverOpts(netOption),
 		libnetwork.NetworkOptionIpam("default", "", v4Conf, v6Conf, nil),
@@ -962,7 +967,7 @@ func setupRemappedRoot(config *Config) ([]idtools.IDMap, []idtools.IDMap, error)
 		if username == "root" {
 			// Cannot setup user namespaces with a 1-to-1 mapping; "--root=0:0" is a no-op
 			// effectively
-			logrus.Warnf("User namespaces: root cannot be remapped with itself; user namespaces are OFF")
+			logrus.Warn("User namespaces: root cannot be remapped with itself; user namespaces are OFF")
 			return uidMaps, gidMaps, nil
 		}
 		logrus.Infof("User namespaces: ID ranges will be mapped to subuid/subgid ranges of: %s:%s", username, groupname)
@@ -1025,7 +1030,6 @@ func (daemon *Daemon) registerLinks(container *container.Container, hostConfig *
 		}
 		child, err := daemon.GetContainer(name)
 		if err != nil {
-			//An error from daemon.GetContainer() means this name could not be found
 			return fmt.Errorf("Could not get container for %s", name)
 		}
 		for child.HostConfig.NetworkMode.IsContainer() {
