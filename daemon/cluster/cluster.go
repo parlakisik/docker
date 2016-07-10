@@ -22,6 +22,7 @@ import (
 	"github.com/docker/docker/pkg/ioutils"
 	"github.com/docker/docker/runconfig"
 	apitypes "github.com/docker/engine-api/types"
+	"github.com/docker/engine-api/types/filters"
 	types "github.com/docker/engine-api/types/swarm"
 	swarmagent "github.com/docker/swarmkit/agent"
 	swarmapi "github.com/docker/swarmkit/api"
@@ -411,18 +412,18 @@ func (c *Cluster) Leave(force bool) error {
 			if err == nil {
 				if active && reachable-2 <= unreachable {
 					if reachable == 1 && unreachable == 0 {
-						msg += "Leaving last manager will remove all current state of the cluster. Use `--force` to ignore this message. "
+						msg += "Removing the last manager will erase all current state of the cluster. Use `--force` to ignore this message. "
 						c.Unlock()
 						return fmt.Errorf(msg)
 					}
-					msg += fmt.Sprintf("Leaving cluster will leave you with %v managers out of %v. This means Raft quorum will be lost and your cluster will become inaccessible. ", reachable-1, reachable+unreachable)
+					msg += fmt.Sprintf("Leaving the cluster will leave you with %v managers out of %v. This means Raft quorum will be lost and your cluster will become inaccessible. ", reachable-1, reachable+unreachable)
 				}
 			}
 		} else {
 			msg += "Doing so may lose the consensus of your cluster. "
 		}
 
-		msg += "Only way to restore a cluster that has lost consensus is to reinitialize it with `--force-new-cluster`. Use `--force` to ignore this message."
+		msg += "The only way to restore a cluster that has lost consensus is to reinitialize it with `--force-new-cluster`. Use `--force` to ignore this message."
 		c.Unlock()
 		return fmt.Errorf(msg)
 	}
@@ -663,7 +664,7 @@ func (c *Cluster) GetServices(options apitypes.ServiceListOptions) ([]types.Serv
 }
 
 // CreateService creates a new service in a managed swarm cluster.
-func (c *Cluster) CreateService(s types.ServiceSpec) (string, error) {
+func (c *Cluster) CreateService(s types.ServiceSpec, encodedAuth string) (string, error) {
 	c.RLock()
 	defer c.RUnlock()
 
@@ -682,6 +683,15 @@ func (c *Cluster) CreateService(s types.ServiceSpec) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
+	if encodedAuth != "" {
+		ctnr := serviceSpec.Task.GetContainer()
+		if ctnr == nil {
+			return "", fmt.Errorf("service does not use container tasks")
+		}
+		ctnr.PullOptions = &swarmapi.ContainerSpec_PullOptions{RegistryAuth: encodedAuth}
+	}
+
 	r, err := c.client.CreateService(ctx, &swarmapi.CreateServiceRequest{Spec: &serviceSpec})
 	if err != nil {
 		return "", err
@@ -707,7 +717,7 @@ func (c *Cluster) GetService(input string) (types.Service, error) {
 }
 
 // UpdateService updates existing service to match new properties.
-func (c *Cluster) UpdateService(serviceID string, version uint64, spec types.ServiceSpec) error {
+func (c *Cluster) UpdateService(serviceID string, version uint64, spec types.ServiceSpec, encodedAuth string) error {
 	c.RLock()
 	defer c.RUnlock()
 
@@ -718,6 +728,26 @@ func (c *Cluster) UpdateService(serviceID string, version uint64, spec types.Ser
 	serviceSpec, err := convert.ServiceSpecToGRPC(spec)
 	if err != nil {
 		return err
+	}
+
+	if encodedAuth != "" {
+		ctnr := serviceSpec.Task.GetContainer()
+		if ctnr == nil {
+			return fmt.Errorf("service does not use container tasks")
+		}
+		ctnr.PullOptions = &swarmapi.ContainerSpec_PullOptions{RegistryAuth: encodedAuth}
+	} else {
+		// this is needed because if the encodedAuth isn't being updated then we
+		// shouldn't lose it, and continue to use the one that was already present
+		currentService, err := getService(c.getRequestContext(), c.client, serviceID)
+		if err != nil {
+			return err
+		}
+		ctnr := currentService.Spec.Task.GetContainer()
+		if ctnr == nil {
+			return fmt.Errorf("service does not use container tasks")
+		}
+		serviceSpec.Task.GetContainer().PullOptions = ctnr.PullOptions
 	}
 
 	_, err = c.client.UpdateService(
@@ -855,7 +885,33 @@ func (c *Cluster) GetTasks(options apitypes.TaskListOptions) ([]types.Task, erro
 		return nil, c.errNoManager()
 	}
 
-	filters, err := newListTasksFilters(options.Filter)
+	byName := func(filter filters.Args) error {
+		if filter.Include("service") {
+			serviceFilters := filter.Get("service")
+			for _, serviceFilter := range serviceFilters {
+				service, err := c.GetService(serviceFilter)
+				if err != nil {
+					return err
+				}
+				filter.Del("service", serviceFilter)
+				filter.Add("service", service.ID)
+			}
+		}
+		if filter.Include("node") {
+			nodeFilters := filter.Get("node")
+			for _, nodeFilter := range nodeFilters {
+				node, err := c.GetNode(nodeFilter)
+				if err != nil {
+					return err
+				}
+				filter.Del("node", nodeFilter)
+				filter.Add("node", node.ID)
+			}
+		}
+		return nil
+	}
+
+	filters, err := newListTasksFilters(options.Filter, byName)
 	if err != nil {
 		return nil, err
 	}
@@ -1002,7 +1058,7 @@ func getNetwork(ctx context.Context, c swarmapi.ControlClient, input string) (*s
 		}
 
 		if l := len(rl.Networks); l > 1 {
-			return nil, fmt.Errorf("network %s is ambigious (%d matches found)", input, l)
+			return nil, fmt.Errorf("network %s is ambiguous (%d matches found)", input, l)
 		}
 
 		return rl.Networks[0], nil
