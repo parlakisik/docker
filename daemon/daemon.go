@@ -23,11 +23,11 @@ import (
 	"github.com/Sirupsen/logrus"
 	containerd "github.com/docker/containerd/api/grpc/types"
 	"github.com/docker/docker/api"
+	"github.com/docker/docker/api/types"
+	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/container"
 	"github.com/docker/docker/daemon/events"
 	"github.com/docker/docker/daemon/exec"
-	"github.com/docker/engine-api/types"
-	containertypes "github.com/docker/engine-api/types/container"
 	"github.com/docker/libnetwork/cluster"
 	// register graph drivers
 	_ "github.com/docker/docker/daemon/graphdriver/register"
@@ -147,6 +147,7 @@ func (daemon *Daemon) restore() error {
 	}
 
 	var migrateLegacyLinks bool
+	removeContainers := make(map[string]*container.Container)
 	restartContainers := make(map[*container.Container]chan struct{})
 	activeSandboxes := make(map[string]interface{})
 	for _, c := range containers {
@@ -157,6 +158,12 @@ func (daemon *Daemon) restore() error {
 		if err := daemon.Register(c); err != nil {
 			logrus.Errorf("Failed to register container %s: %s", c.ID, err)
 			continue
+		}
+
+		// verify that all volumes valid and have been migrated from the pre-1.7 layout
+		if err := daemon.verifyVolumesInfo(c); err != nil {
+			// don't skip the container due to error
+			logrus.Errorf("Failed to verify volumes for container '%s': %v", c.ID, err)
 		}
 
 		// The LogConfig.Type is empty if the container was created before docker 1.12 with default log driver.
@@ -178,7 +185,7 @@ func (daemon *Daemon) restore() error {
 			rm := c.RestartManager(false)
 			if c.IsRunning() || c.IsPaused() {
 				if err := daemon.containerd.Restore(c.ID, libcontainerd.WithRestartManager(rm)); err != nil {
-					logrus.Errorf("Failed to restore with containerd: %q", err)
+					logrus.Errorf("Failed to restore %s with containerd: %s", c.ID, err)
 					return
 				}
 				if !c.HostConfig.NetworkMode.IsContainer() && c.IsRunning() {
@@ -194,10 +201,16 @@ func (daemon *Daemon) restore() error {
 			}
 			// fixme: only if not running
 			// get list of containers we need to restart
-			if daemon.configStore.AutoRestart && !c.IsRunning() && !c.IsPaused() && c.ShouldRestart() {
-				mapLock.Lock()
-				restartContainers[c] = make(chan struct{})
-				mapLock.Unlock()
+			if !c.IsRunning() && !c.IsPaused() {
+				if daemon.configStore.AutoRestart && c.ShouldRestart() {
+					mapLock.Lock()
+					restartContainers[c] = make(chan struct{})
+					mapLock.Unlock()
+				} else if c.HostConfig != nil && c.HostConfig.AutoRemove {
+					mapLock.Lock()
+					removeContainers[c.ID] = c
+					mapLock.Unlock()
+				}
 			}
 
 			if c.RemovalInProgress {
@@ -283,6 +296,18 @@ func (daemon *Daemon) restore() error {
 	}
 	group.Wait()
 
+	removeGroup := sync.WaitGroup{}
+	for id := range removeContainers {
+		removeGroup.Add(1)
+		go func(cid string) {
+			if err := daemon.ContainerRm(cid, &types.ContainerRmConfig{ForceRemove: true, RemoveVolume: true}); err != nil {
+				logrus.Errorf("Failed to remove container %s: %s", cid, err)
+			}
+			removeGroup.Done()
+		}(id)
+	}
+	removeGroup.Wait()
+
 	// any containers that were started above would already have had this done,
 	// however we need to now prepare the mountpoints for the rest of the containers as well.
 	// This shouldn't cause any issue running on the containers that already had this run.
@@ -295,7 +320,11 @@ func (daemon *Daemon) restore() error {
 		// has a volume and the volume dirver is not available.
 		if _, ok := restartContainers[c]; ok {
 			continue
+		} else if _, ok := removeContainers[c.ID]; ok {
+			// container is automatically removed, skip it.
+			continue
 		}
+
 		group.Add(1)
 		go func(c *container.Container) {
 			defer group.Done()
@@ -412,7 +441,7 @@ func NewDaemon(config *Config, registryService registry.Service, containerdRemot
 
 	// set up SIGUSR1 handler on Unix-like systems, or a Win32 global event
 	// on Windows to dump Go routine stacks
-	setupDumpStackTrap()
+	setupDumpStackTrap(config.Root)
 
 	uidMaps, gidMaps, err := setupRemappedRoot(config)
 	if err != nil {
@@ -434,7 +463,11 @@ func NewDaemon(config *Config, registryService registry.Service, containerdRemot
 		}
 	}
 
-	if err = setupDaemonRoot(config, realRoot, rootUID, rootGID); err != nil {
+	if err := setupDaemonRoot(config, realRoot, rootUID, rootGID); err != nil {
+		return nil, err
+	}
+
+	if err := setupDaemonProcess(config); err != nil {
 		return nil, err
 	}
 
@@ -545,10 +578,6 @@ func NewDaemon(config *Config, registryService registry.Service, containerdRemot
 		return nil, fmt.Errorf("Couldn't create Tag store repositories: %s", err)
 	}
 
-	if err := restoreCustomImage(d.imageStore, d.layerStore, referenceStore); err != nil {
-		return nil, fmt.Errorf("Couldn't restore custom images: %s", err)
-	}
-
 	migrationStart := time.Now()
 	if err := v1.Migrate(config.Root, graphDriver, d.layerStore, d.imageStore, referenceStore, distributionMetadataStore); err != nil {
 		logrus.Errorf("Graph migration failed: %q. Your old graph data was found to be too inconsistent for upgrading to content-addressable storage. Some of the old data was probably not upgraded. We recommend starting over with a clean storage directory if possible.", err)
@@ -597,6 +626,11 @@ func NewDaemon(config *Config, registryService registry.Service, containerdRemot
 
 	d.containerd, err = containerdRemote.Client(d)
 	if err != nil {
+		return nil, err
+	}
+
+	// Plugin system initialization should happen before restore. Dont change order.
+	if err := pluginInit(d, config, containerdRemote); err != nil {
 		return nil, err
 	}
 
@@ -651,7 +685,10 @@ func (daemon *Daemon) Shutdown() error {
 	daemon.shutdown = true
 	// Keep mounts and networking running on daemon shutdown if
 	// we are to keep containers running and restore them.
-	if daemon.configStore.LiveRestore {
+
+	pluginShutdown()
+
+	if daemon.configStore.LiveRestoreEnabled && daemon.containers != nil {
 		// check if there are any running containers, if none we should do some cleanup
 		if ls, err := daemon.Containers(&types.ContainerListOptions{}); len(ls) != 0 || err != nil {
 			return nil
@@ -724,6 +761,42 @@ func (daemon *Daemon) Unmount(container *container.Container) error {
 		return err
 	}
 	return nil
+}
+
+// V4Subnets returns the IPv4 subnets of networks that are managed by Docker.
+func (daemon *Daemon) V4Subnets() []net.IPNet {
+	var subnets []net.IPNet
+
+	managedNetworks := daemon.netController.Networks()
+
+	for _, managedNetwork := range managedNetworks {
+		v4Infos, _ := managedNetwork.Info().IpamInfo()
+		for _, v4Info := range v4Infos {
+			if v4Info.IPAMData.Pool != nil {
+				subnets = append(subnets, *v4Info.IPAMData.Pool)
+			}
+		}
+	}
+
+	return subnets
+}
+
+// V6Subnets returns the IPv6 subnets of networks that are managed by Docker.
+func (daemon *Daemon) V6Subnets() []net.IPNet {
+	var subnets []net.IPNet
+
+	managedNetworks := daemon.netController.Networks()
+
+	for _, managedNetwork := range managedNetworks {
+		_, v6Infos := managedNetwork.Info().IpamInfo()
+		for _, v6Info := range v6Infos {
+			if v6Info.IPAMData.Pool != nil {
+				subnets = append(subnets, *v6Info.IPAMData.Pool)
+			}
+		}
+	}
+
+	return subnets
 }
 
 func writeDistributionProgress(cancelFunc func(), outStream io.Writer, progressChan <-chan progress.Progress) {
@@ -873,8 +946,8 @@ func (daemon *Daemon) Reload(config *Config) error {
 		daemon.configStore.Debug = config.Debug
 	}
 	if config.IsValueSet("live-restore") {
-		daemon.configStore.LiveRestore = config.LiveRestore
-		if err := daemon.containerdRemote.UpdateOptions(libcontainerd.WithLiveRestore(config.LiveRestore)); err != nil {
+		daemon.configStore.LiveRestoreEnabled = config.LiveRestoreEnabled
+		if err := daemon.containerdRemote.UpdateOptions(libcontainerd.WithLiveRestore(config.LiveRestoreEnabled)); err != nil {
 			return err
 		}
 
@@ -908,6 +981,7 @@ func (daemon *Daemon) Reload(config *Config) error {
 
 	// We emit daemon reload event here with updatable configurations
 	attributes["debug"] = fmt.Sprintf("%t", daemon.configStore.Debug)
+	attributes["live-restore"] = fmt.Sprintf("%t", daemon.configStore.LiveRestoreEnabled)
 	attributes["cluster-store"] = daemon.configStore.ClusterStore
 	if daemon.configStore.ClusterOpts != nil {
 		opts, _ := json.Marshal(daemon.configStore.ClusterOpts)
@@ -1003,6 +1077,7 @@ func (daemon *Daemon) networkOptions(dconfig *Config, activeSandboxes map[string
 	}
 
 	options = append(options, nwconfig.OptionDataDir(dconfig.Root))
+	options = append(options, nwconfig.OptionExecRoot(dconfig.GetExecRoot()))
 
 	dd := runconfig.DefaultDaemonNetworkMode()
 	dn := runconfig.DefaultDaemonNetworkMode().NetworkName()
@@ -1032,7 +1107,7 @@ func (daemon *Daemon) networkOptions(dconfig *Config, activeSandboxes map[string
 	options = append(options, nwconfig.OptionLabels(dconfig.Labels))
 	options = append(options, driverOptions(dconfig)...)
 
-	if daemon.configStore != nil && daemon.configStore.LiveRestore && len(activeSandboxes) != 0 {
+	if daemon.configStore != nil && daemon.configStore.LiveRestoreEnabled && len(activeSandboxes) != 0 {
 		options = append(options, nwconfig.OptionActiveSandboxes(activeSandboxes))
 	}
 

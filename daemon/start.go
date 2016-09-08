@@ -10,11 +10,12 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/Sirupsen/logrus"
+	"github.com/docker/docker/api/types"
+	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/container"
 	"github.com/docker/docker/errors"
 	"github.com/docker/docker/libcontainerd"
 	"github.com/docker/docker/runconfig"
-	containertypes "github.com/docker/engine-api/types/container"
 )
 
 // ContainerStart starts a container.
@@ -112,6 +113,14 @@ func (daemon *Daemon) containerStart(container *container.Container) (err error)
 			}
 			container.ToDisk()
 			daemon.Cleanup(container)
+			// if containers AutoRemove flag is set, remove it after clean up
+			if container.HostConfig.AutoRemove {
+				container.Unlock()
+				if err := daemon.ContainerRm(container.ID, &types.ContainerRmConfig{ForceRemove: true, RemoveVolume: true}); err != nil {
+					logrus.Errorf("can't remove container %s: %v", container.ID, err)
+				}
+				container.Lock()
+			}
 		}
 	}()
 
@@ -156,6 +165,12 @@ func (daemon *Daemon) containerStart(container *container.Container) (err error)
 		// set to 126 for container cmd can't be invoked errors
 		if strings.Contains(errDesc, syscall.EACCES.Error()) {
 			container.SetExitCode(126)
+		}
+
+		// attempted to mount a file onto a directory, or a directory onto a file, maybe from user specified bind mounts
+		if strings.Contains(errDesc, syscall.ENOTDIR.Error()) {
+			errDesc += ": Are you trying to mount a directory onto a file (or vice-versa)? Check if the specified host path exists and is the expected type"
+			container.SetExitCode(127)
 		}
 
 		container.Reset(false)

@@ -7,7 +7,7 @@ import (
 	"sync"
 
 	"github.com/docker/docker/pkg/locker"
-	"github.com/docker/docker/plugin"
+	pluginStore "github.com/docker/docker/plugin/store"
 	"github.com/docker/docker/volume"
 )
 
@@ -102,23 +102,21 @@ func lookup(name string) (volume.Driver, error) {
 		return ext, nil
 	}
 
-	p, err := plugin.LookupWithCapability(name, extName)
+	p, err := pluginStore.LookupWithCapability(name, extName)
 	if err != nil {
 		return nil, fmt.Errorf("Error looking up volume plugin %s: %v", name, err)
 	}
 
-	drivers.Lock()
-	defer drivers.Unlock()
-	if ext, ok := drivers.extensions[name]; ok {
-		return ext, nil
-	}
-
-	d := NewVolumeDriver(name, p.Client())
+	d := NewVolumeDriver(p.Name(), p.Client())
 	if err := validateDriver(d); err != nil {
 		return nil, err
 	}
 
-	drivers.extensions[name] = d
+	if p.IsLegacy() {
+		drivers.Lock()
+		drivers.extensions[name] = d
+		drivers.Unlock()
+	}
 	return d, nil
 }
 
@@ -153,7 +151,7 @@ func GetDriverList() []string {
 
 // GetAllDrivers lists all the registered drivers
 func GetAllDrivers() ([]volume.Driver, error) {
-	plugins, err := plugin.FindWithCapability(extName)
+	plugins, err := pluginStore.FindWithCapability(extName)
 	if err != nil {
 		return nil, fmt.Errorf("error listing plugins: %v", err)
 	}
@@ -174,7 +172,9 @@ func GetAllDrivers() ([]volume.Driver, error) {
 		}
 
 		ext = NewVolumeDriver(name, p.Client())
-		drivers.extensions[name] = ext
+		if p.IsLegacy() {
+			drivers.extensions[name] = ext
+		}
 		ds = append(ds, ext)
 	}
 	return ds, nil

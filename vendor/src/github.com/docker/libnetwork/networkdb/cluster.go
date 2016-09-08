@@ -81,7 +81,7 @@ func (nDB *NetworkDB) RemoveKey(key []byte) {
 func (nDB *NetworkDB) clusterInit() error {
 	config := memberlist.DefaultLANConfig()
 	config.Name = nDB.config.NodeName
-	config.BindAddr = nDB.config.BindAddr
+	config.AdvertiseAddr = nDB.config.AdvertiseAddr
 
 	if nDB.config.BindPort != 0 {
 		config.BindPort = nDB.config.BindPort
@@ -305,7 +305,10 @@ func (nDB *NetworkDB) gossip() {
 func (nDB *NetworkDB) bulkSyncTables() {
 	var networks []string
 	nDB.RLock()
-	for nid := range nDB.networks[nDB.config.NodeName] {
+	for nid, network := range nDB.networks[nDB.config.NodeName] {
+		if network.leaving {
+			continue
+		}
 		networks = append(networks, nid)
 	}
 	nDB.RUnlock()
@@ -358,6 +361,10 @@ func (nDB *NetworkDB) bulkSync(nid string, nodes []string, all bool) ([]string, 
 	if !all {
 		// If not all, then just pick one.
 		nodes = nDB.mRandomNodes(1, nodes)
+	}
+
+	if len(nodes) == 0 {
+		return nil, nil
 	}
 
 	logrus.Debugf("%s: Initiating bulk sync with nodes %v", nDB.config.NodeName, nodes)

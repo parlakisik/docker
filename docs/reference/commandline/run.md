@@ -70,7 +70,7 @@ Options:
       --label-file value            Read in a line delimited file of labels (default [])
       --link value                  Add link to another container (default [])
       --link-local-ip value         Container IPv4/IPv6 link-local addresses (default [])
-      --log-driver string           Logging driver for container
+      --log-driver string           Logging driver for the container
       --log-opt value               Log driver options (default [])
       --mac-address string          Container MAC address (e.g. 92:d0:c6:0a:29:33)
   -m, --memory string               Memory limit
@@ -78,13 +78,13 @@ Options:
       --memory-swap string          Swap limit equal to memory plus swap: '-1' to enable unlimited swap
       --memory-swappiness int       Tune container memory swappiness (0 to 100) (default -1).
       --name string                 Assign a name to the container
-      --net string                  Connect a container to a network (default "default")
+      --network-alias value         Add network-scoped alias for the container (default [])
+      --network string              Connect a container to a network
                                     'bridge': create a network stack on the default Docker bridge
                                     'none': no networking
                                     'container:<name|id>': reuse another container's network stack
                                     'host': use the Docker host network stack
                                     '<network-name>|<network-id>': connect to a user-defined network
-      --net-alias value             Add network-scoped alias for the container (default [])
       --no-healthcheck              Disable any container-specified HEALTHCHECK
       --oom-kill-disable            Disable OOM Killer
       --oom-score-adj int           Tune host's OOM preferences (-1000 to 1000)
@@ -95,7 +95,7 @@ Options:
   -P, --publish-all                 Publish all exposed ports to random ports
       --read-only                   Mount the container's root filesystem as read only
       --restart string              Restart policy to apply when a container exits (default "no")
-                                    Possible values are : no, on-failuer[:max-retry], always, unless-stopped
+                                    Possible values are : no, on-failure[:max-retry], always, unless-stopped
       --rm                          Automatically remove the container when it exits
       --runtime string              Runtime to use for this container
       --security-opt value          Security Options (default [])
@@ -105,7 +105,7 @@ Options:
                                     or `g` (gigabytes). If you omit the unit, the system uses bytes.
       --sig-proxy                   Proxy received signals to the process (default true)
       --stop-signal string          Signal to stop a container, SIGTERM by default (default "SIGTERM")
-      --storage-opt value           Set storage driver options per container (default [])
+      --storage-opt value           Storage driver options for the container (default [])
       --sysctl value                Sysctl options (default map[])
       --tmpfs value                 Mount a tmpfs directory (default [])
   -t, --tty                         Allocate a pseudo-TTY
@@ -194,11 +194,11 @@ The `-w` lets the command being executed inside directory given, here
 
 ### Set storage driver options per container
 
-    $ docker create -it --storage-opt size=120G fedora /bin/bash
+    $ docker run -it --storage-opt size=120G fedora /bin/bash
 
 This (size) will allow to set the container rootfs size to 120G at creation time. 
 User cannot pass a size less than the Default BaseFS Size. This option is only 
-available for the `devicemapper`, `btrfs`, and `zfs` graph drivers.
+available for the `devicemapper`, `btrfs`, `windowsfilter`, and `zfs` graph drivers.
 
 ### Mount tmpfs (--tmpfs)
 
@@ -224,7 +224,7 @@ will automatically create this directory on the host for you. In the
 example above, Docker will create the `/doesnt/exist`
 folder before starting your container.
 
-    $ docker run --read-only -v /icanwrite busybox touch /icanwrite here
+    $ docker run --read-only -v /icanwrite busybox touch /icanwrite/here
 
 Volumes can be used in combination with `--read-only` to control where
 a container writes files. The `--read-only` flag mounts the container's root
@@ -360,20 +360,20 @@ For additional information on working with labels, see [*Labels - custom
 metadata in Docker*](../../userguide/labels-custom-metadata.md) in the Docker User
 Guide.
 
-### Connect a container to a network (--net)
+### Connect a container to a network (--network)
 
-When you start a container use the `--net` flag to connect it to a network.
+When you start a container use the `--network` flag to connect it to a network.
 This adds the `busybox` container to the `my-net` network.
 
 ```bash
-$ docker run -itd --net=my-net busybox
+$ docker run -itd --network=my-net busybox
 ```
 
 You can also choose the IP addresses for the container with `--ip` and `--ip6`
 flags when you start the container on a user-defined network.
 
 ```bash
-$ docker run -itd --net=my-net --ip=10.10.9.75 busybox
+$ docker run -itd --network=my-net --ip=10.10.9.75 busybox
 ```
 
 If you want to add a running container to a network use the `docker network connect` subcommand.
@@ -657,7 +657,7 @@ network namespace, run this command:
     $ docker run --sysctl net.ipv4.ip_forward=1 someimage
 
 
-> **Note**: Not all sysctls are namespaced. docker does not support changing sysctls
+> **Note**: Not all sysctls are namespaced. Docker does not support changing sysctls
 > inside of a container that also modify the host system. As the kernel 
 > evolves we expect to see more sysctls become namespaced.
 
@@ -673,4 +673,4 @@ network namespace, run this command:
   `Network Namespace`:
       Sysctls beginning with net.*
 
-  If you use the `--net=host` option using these sysctls will not be allowed.
+  If you use the `--network=host` option using these sysctls will not be allowed.

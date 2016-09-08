@@ -4,8 +4,8 @@ import (
 	"fmt"
 
 	"github.com/docker/docker/api/client"
+	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/cli"
-	"github.com/docker/engine-api/types"
 	"github.com/spf13/cobra"
 	"golang.org/x/net/context"
 )
@@ -28,7 +28,16 @@ func newCreateCommand(dockerCli *client.DockerCli) *cobra.Command {
 	flags := cmd.Flags()
 	flags.StringVar(&opts.mode, flagMode, "replicated", "Service mode (replicated or global)")
 	addServiceFlags(cmd, opts)
-	cmd.Flags().SetInterspersed(false)
+
+	flags.VarP(&opts.labels, flagLabel, "l", "Service labels")
+	flags.Var(&opts.containerLabels, flagContainerLabel, "Container labels")
+	flags.VarP(&opts.env, flagEnv, "e", "Set environment variables")
+	flags.Var(&opts.mounts, flagMount, "Attach a mount to the service")
+	flags.StringSliceVar(&opts.constraints, flagConstraint, []string{}, "Placement constraints")
+	flags.StringSliceVar(&opts.networks, flagNetwork, []string{}, "Network attachments")
+	flags.VarP(&opts.endpoint.ports, flagPublish, "p", "Publish a port as a node port")
+
+	flags.SetInterspersed(false)
 	return cmd
 }
 

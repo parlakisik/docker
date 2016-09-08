@@ -9,6 +9,8 @@ import (
 	"golang.org/x/net/context"
 
 	"github.com/Sirupsen/logrus"
+	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/strslice"
 	"github.com/docker/docker/container"
 	"github.com/docker/docker/daemon/exec"
 	"github.com/docker/docker/errors"
@@ -16,8 +18,6 @@ import (
 	"github.com/docker/docker/pkg/pools"
 	"github.com/docker/docker/pkg/signal"
 	"github.com/docker/docker/pkg/term"
-	"github.com/docker/engine-api/types"
-	"github.com/docker/engine-api/types/strslice"
 )
 
 // Seconds to wait after sending TERM before trying KILL
@@ -199,12 +199,12 @@ func (d *Daemon) ContainerExecStart(ctx context.Context, name string, stdin io.R
 	}
 
 	if err := execSetPlatformOpt(c, ec, &p); err != nil {
-		return nil
+		return err
 	}
 
 	attachErr := container.AttachStreams(ctx, ec.StreamConfig, ec.OpenStdin, true, ec.Tty, cStdin, cStdout, cStderr, ec.DetachKeys)
 
-	if err := d.containerd.AddProcess(c.ID, name, p); err != nil {
+	if err := d.containerd.AddProcess(ctx, c.ID, name, p); err != nil {
 		return err
 	}
 

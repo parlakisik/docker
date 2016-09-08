@@ -3,7 +3,7 @@ package convert
 import (
 	"strings"
 
-	types "github.com/docker/engine-api/types/swarm"
+	types "github.com/docker/docker/api/types/swarm"
 	swarmapi "github.com/docker/swarmkit/api"
 	"github.com/docker/swarmkit/protobuf/ptypes"
 )
@@ -22,6 +22,7 @@ func TaskFromGRPC(t swarmapi.Task) types.Task {
 			Resources:     resourcesFromGRPC(t.Spec.Resources),
 			RestartPolicy: restartPolicyFromGRPC(t.Spec.Restart),
 			Placement:     placementFromGRPC(t.Spec.Placement),
+			LogDriver:     driverFromGRPC(t.Spec.LogDriver),
 		},
 		Status: types.TaskStatus{
 			State:   types.TaskState(strings.ToLower(t.Status.State.String())),
