@@ -375,18 +375,6 @@ func (b *Builder) calcCopyInfo(cmdName, origPath string, allowLocalDecompression
 	return copyInfos, nil
 }
 
-func containsWildcards(name string) bool {
-	for i := 0; i < len(name); i++ {
-		ch := name[i]
-		if ch == '\\' {
-			i++
-		} else if ch == '*' || ch == '?' || ch == '[' {
-			return true
-		}
-	}
-	return false
-}
-
 func (b *Builder) processImageFrom(img builder.Image) error {
 	if img != nil {
 		b.image = img.ImageID()
@@ -435,14 +423,12 @@ func (b *Builder) processImageFrom(img builder.Image) error {
 		}
 
 		total := len(ast.Children)
-		for i, n := range ast.Children {
-			switch strings.ToUpper(n.Value) {
-			case "ONBUILD":
-				return fmt.Errorf("Chaining ONBUILD via `ONBUILD ONBUILD` isn't allowed")
-			case "MAINTAINER", "FROM":
-				return fmt.Errorf("%s isn't allowed as an ONBUILD trigger", n.Value)
+		for _, n := range ast.Children {
+			if err := b.checkDispatch(n, true); err != nil {
+				return err
 			}
-
+		}
+		for i, n := range ast.Children {
 			if err := b.dispatch(i, total, n); err != nil {
 				return err
 			}
@@ -555,7 +541,7 @@ func (b *Builder) run(cID string) (err error) {
 		}
 	}()
 
-	if err := b.docker.ContainerStart(cID, nil, true); err != nil {
+	if err := b.docker.ContainerStart(cID, nil, true, ""); err != nil {
 		return err
 	}
 

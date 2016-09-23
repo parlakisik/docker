@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/Sirupsen/logrus"
+	"github.com/docker/docker/api/errors"
 	apitypes "github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/network"
@@ -21,7 +22,6 @@ import (
 	"github.com/docker/docker/daemon/cluster/convert"
 	executorpkg "github.com/docker/docker/daemon/cluster/executor"
 	"github.com/docker/docker/daemon/cluster/executor/container"
-	"github.com/docker/docker/errors"
 	"github.com/docker/docker/opts"
 	"github.com/docker/docker/pkg/ioutils"
 	"github.com/docker/docker/pkg/signal"
@@ -135,10 +135,11 @@ type Cluster struct {
 // helps in identifying the attachment ID via the taskID and the
 // corresponding attachment configuration obtained from the manager.
 type attacher struct {
-	taskID       string
-	config       *network.NetworkingConfig
-	attachWaitCh chan *network.NetworkingConfig
-	detachWaitCh chan struct{}
+	taskID           string
+	config           *network.NetworkingConfig
+	attachWaitCh     chan *network.NetworkingConfig
+	attachCompleteCh chan struct{}
+	detachWaitCh     chan struct{}
 }
 
 type node struct {
@@ -718,6 +719,13 @@ func (c *Cluster) GetLocalAddress() string {
 	return c.actualLocalAddr
 }
 
+// GetListenAddress returns the listen address.
+func (c *Cluster) GetListenAddress() string {
+	c.RLock()
+	defer c.RUnlock()
+	return c.listenAddr
+}
+
 // GetAdvertiseAddress returns the remotely reachable address of this node.
 func (c *Cluster) GetAdvertiseAddress() string {
 	c.RLock()
@@ -1157,7 +1165,9 @@ func (c *Cluster) GetTasks(options apitypes.TaskListOptions) ([]types.Task, erro
 	tasks := []types.Task{}
 
 	for _, task := range r.Tasks {
-		tasks = append(tasks, convert.TaskFromGRPC(*task))
+		if task.Spec.GetContainer() != nil {
+			tasks = append(tasks, convert.TaskFromGRPC(*task))
+		}
 	}
 	return tasks, nil
 }
@@ -1262,11 +1272,23 @@ func (c *Cluster) WaitForDetachment(ctx context.Context, networkName, networkID,
 	agent := c.node.Agent()
 	c.RUnlock()
 
-	if ok && attacher != nil && attacher.detachWaitCh != nil {
+	if ok && attacher != nil &&
+		attacher.detachWaitCh != nil &&
+		attacher.attachCompleteCh != nil {
+		// Attachment may be in progress still so wait for
+		// attachment to complete.
 		select {
-		case <-attacher.detachWaitCh:
+		case <-attacher.attachCompleteCh:
 		case <-ctx.Done():
 			return ctx.Err()
+		}
+
+		if attacher.taskID == taskID {
+			select {
+			case <-attacher.detachWaitCh:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		}
 	}
 
@@ -1289,9 +1311,11 @@ func (c *Cluster) AttachNetwork(target string, containerID string, addresses []s
 	agent := c.node.Agent()
 	attachWaitCh := make(chan *network.NetworkingConfig)
 	detachWaitCh := make(chan struct{})
+	attachCompleteCh := make(chan struct{})
 	c.attachers[aKey] = &attacher{
-		attachWaitCh: attachWaitCh,
-		detachWaitCh: detachWaitCh,
+		attachWaitCh:     attachWaitCh,
+		attachCompleteCh: attachCompleteCh,
+		detachWaitCh:     detachWaitCh,
 	}
 	c.Unlock()
 
@@ -1306,6 +1330,11 @@ func (c *Cluster) AttachNetwork(target string, containerID string, addresses []s
 		return nil, fmt.Errorf("Could not attach to network %s: %v", target, err)
 	}
 
+	c.Lock()
+	c.attachers[aKey].taskID = taskID
+	close(attachCompleteCh)
+	c.Unlock()
+
 	logrus.Debugf("Successfully attached to network %s with tid %s", target, taskID)
 
 	var config *network.NetworkingConfig
@@ -1316,7 +1345,6 @@ func (c *Cluster) AttachNetwork(target string, containerID string, addresses []s
 	}
 
 	c.Lock()
-	c.attachers[aKey].taskID = taskID
 	c.attachers[aKey].config = config
 	c.Unlock()
 	return config, nil
